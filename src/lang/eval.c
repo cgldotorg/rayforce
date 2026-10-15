@@ -4741,6 +4741,7 @@ static void ray_register_builtins(void) {
     register_unary(".sys.cmd",    RAY_FN_RESTRICTED, ray_syscmd_string_dispatch_fn);
     register_vary (".sys.timeit", RAY_FN_NONE,       ray_sys_timeit_fn);
     register_unary(".sys.listen", RAY_FN_RESTRICTED, ray_sys_listen_fn);
+    register_binary(".sys.loadfn", RAY_FN_RESTRICTED, ray_sys_loadfn_fn);
     register_vary (".sys.env",    RAY_FN_NONE,       ray_sys_env_fn);
     register_vary (".sys.args",   RAY_FN_NONE,       ray_sys_args_fn);
 

@@ -65,6 +65,7 @@ void* ray_runtime_get_sys_args(void);
 #if !defined(RAY_OS_WINDOWS)
 #include <unistd.h>
 #include <sys/wait.h>   /* WIFEXITED/WEXITSTATUS — .sys.exec exit codes */
+#include <dlfcn.h>      /* dlopen/dlsym — .sys.loadfn */
 #define RAY_POPEN(c, m)  popen((c), (m))
 #define RAY_PCLOSE(f)    pclose(f)
 #else
@@ -1148,6 +1149,43 @@ ray_t* ray_system_fn(ray_t** args, int64_t n) {
 
     if (heapbuf) ray_free_raw(heapbuf);
     return result;
+#endif
+}
+
+/* (.sys.loadfn "path" 'symbol) -- the exported `symbol` of the shared library
+ * at `path` as a host function value (ray_fn_host), for a startup script to
+ * bind with `set`.  RTLD_NOW fails a library with an unresolved symbol here,
+ * while the script runs, instead of ending the process at a restricted
+ * peer's first call.  The library is never closed: the value holds a raw
+ * pointer into it.  Registered RAY_FN_RESTRICTED, so a -U peer gets `access`
+ * before this runs. */
+ray_t* ray_sys_loadfn_fn(ray_t* path, ray_t* sym) {
+    if (path->type != -RAY_STR || sym->type != -RAY_SYM)
+        return ray_error("type", ".sys.loadfn expects a path string and a symbol");
+#if defined(RAY_OS_WINDOWS)
+    return ray_error("nyi", ".sys.loadfn: no loader on Windows");
+#elif defined(RAY_FUZZING)
+    return ray_error("nyi", ".sys.loadfn: disabled under fuzzing");
+#else
+    char pathbuf[4096];
+    const char* p = str_to_cpath(path, pathbuf, sizeof(pathbuf));
+    if (!p)
+        return ray_error("io", ".sys.loadfn: path is empty or too long, got %lld bytes",
+                         (long long)ray_str_len(path));
+
+    ray_t* name_atom = ray_sym_str(sym->i64);
+    char namebuf[256];
+    const char* name = name_atom ? str_to_cpath(name_atom, namebuf, sizeof(namebuf)) : NULL;
+    if (!name) return ray_error("name", ".sys.loadfn: symbol name is empty or too long");
+
+    void* lib = dlopen(p, RTLD_NOW | RTLD_LOCAL);
+    if (!lib) {
+        const char* why = dlerror();
+        return ray_error("io", ".sys.loadfn: %s", why ? why : p);
+    }
+    void* fn = dlsym(lib, name);
+    if (!fn) return ray_error("name", ".sys.loadfn: %s exports no %s", p, name);
+    return ray_fn_host(name, (ray_host_fn)fn);
 #endif
 }
 

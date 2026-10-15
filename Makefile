@@ -136,10 +136,17 @@ ifeq ($(RAY_WINDOWS),1)
 else ifeq ($(UNAME_S),Linux)
   LIBS            = -lm -lpthread
   RELEASE_LDFLAGS = -Wl,--gc-sections -Wl,--as-needed
+  EXPORT_LDFLAGS  = -rdynamic
 else
   LIBS            = -lm
   RELEASE_LDFLAGS = -Wl,-dead_strip
+  EXPORT_LDFLAGS  = -rdynamic
+  HOSTFN_LDFLAGS  = -undefined dynamic_lookup
 endif
+
+# EXPORT_LDFLAGS: a library that .sys.loadfn opens resolves its ray_* calls
+# against the executable, so the executable exports them (an ELF executable
+# leaves its own symbols out of its dynamic table unless linked -rdynamic).
 
 DEBUG_LDFLAGS   = -fsanitize=address,undefined
 
@@ -275,17 +282,17 @@ $(BUILD_INFO_OBJS): $(BUILD_INFO_STAMP)
 
 # Main binary for debug/test (some tests spawn ./$(TARGET) as a server).
 $(TARGET): $(LIB_OBJ) $(MAIN_OBJ)
-	$(CC) $(CFLAGS) -o $(TARGET) $(LIB_OBJ) $(MAIN_OBJ) $(LIBS) $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $(TARGET) $(LIB_OBJ) $(MAIN_OBJ) $(LIBS) $(LDFLAGS) $(EXPORT_LDFLAGS)
 
 # Debug build
 debug: CFLAGS = $(DEBUG_CFLAGS)
 debug: LDFLAGS = $(DEBUG_LDFLAGS)
 debug: $(LIB_OBJ) $(MAIN_OBJ)
-	$(CC) $(CFLAGS) -o $(TARGET) $(LIB_OBJ) $(MAIN_OBJ) $(LIBS) $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $(TARGET) $(LIB_OBJ) $(MAIN_OBJ) $(LIBS) $(LDFLAGS) $(EXPORT_LDFLAGS)
 
 # Release build
 release: $(REL_LIB_OBJ) $(REL_MAIN_OBJ)
-	$(CC) $(RELEASE_CFLAGS) -o $(TARGET) $(REL_LIB_OBJ) $(REL_MAIN_OBJ) $(LIBS) $(RELEASE_LDFLAGS)
+	$(CC) $(RELEASE_CFLAGS) -o $(TARGET) $(REL_LIB_OBJ) $(REL_MAIN_OBJ) $(LIBS) $(RELEASE_LDFLAGS) $(EXPORT_LDFLAGS)
 
 # Static library
 lib: $(LIB_LIB_OBJ)
@@ -373,21 +380,31 @@ TEST_CORES ?= 2
 TEST_FILTER ?=
 TEST_ARGS = $(if $(TEST_FILTER),-f $(TEST_FILTER),)
 
+# The host-function fixture the ipc/hostfn tests load with .sys.loadfn: a
+# shared library that leaves its ray_* references for the executable to
+# resolve.  POSIX only; on Windows the loader answers `nyi`.
+ifneq ($(RAY_WINDOWS),1)
+HOSTFN_LIB = build/libhostfn.so
+$(HOSTFN_LIB): test/hostfn/hostfn.c include/rayforce.h
+	@mkdir -p build
+	$(CC) -shared -fPIC $(WARNS) -std=$(STD) -g -O0 -Iinclude -o $@ $< $(HOSTFN_LDFLAGS)
+endif
+
 # Tests.  Depends on $(TARGET) because test/rfl/system/ipc_diff.rfl
 # spawns ./$(TARGET) as an IPC server via .sys.exec — both binaries
 # must exist on disk and share the build flavour (sanitizers, coverage).
 test: CFLAGS = $(DEBUG_CFLAGS)
 test: LDFLAGS = $(DEBUG_LDFLAGS)
-test: $(LIB_OBJ) $(MAIN_OBJ) $(TEST_OBJ)
-	$(CC) $(CFLAGS) -o $(TARGET) $(LIB_OBJ) $(MAIN_OBJ) $(LIBS) $(LDFLAGS)
-	$(CC) $(CFLAGS) -o $(TARGET).test $(LIB_OBJ) $(TEST_OBJ) $(LIBS) $(LDFLAGS) -Itest
+test: $(LIB_OBJ) $(MAIN_OBJ) $(TEST_OBJ) $(HOSTFN_LIB)
+	$(CC) $(CFLAGS) -o $(TARGET) $(LIB_OBJ) $(MAIN_OBJ) $(LIBS) $(LDFLAGS) $(EXPORT_LDFLAGS)
+	$(CC) $(CFLAGS) -o $(TARGET).test $(LIB_OBJ) $(TEST_OBJ) $(LIBS) $(LDFLAGS) $(EXPORT_LDFLAGS) -Itest
 	RAYFORCE_CORES=$(TEST_CORES) ./$(TARGET).test $(TEST_ARGS)
 
 # The suite with every assert() compiled out (see NDEBUG_CFLAGS).  Relinks
 # ./$(TARGET) in the same flavour, as `test` does, for the IPC-diff tests.
-test-ndebug: $(NDEBUG_LIB_OBJ) $(NDEBUG_MAIN_OBJ) $(NDEBUG_TEST_OBJ)
-	$(CC) $(NDEBUG_CFLAGS) -o $(TARGET) $(NDEBUG_LIB_OBJ) $(NDEBUG_MAIN_OBJ) $(LIBS) $(DEBUG_LDFLAGS)
-	$(CC) $(NDEBUG_CFLAGS) -o $(TARGET).test $(NDEBUG_LIB_OBJ) $(NDEBUG_TEST_OBJ) $(LIBS) $(DEBUG_LDFLAGS) -Itest
+test-ndebug: $(NDEBUG_LIB_OBJ) $(NDEBUG_MAIN_OBJ) $(NDEBUG_TEST_OBJ) $(HOSTFN_LIB)
+	$(CC) $(NDEBUG_CFLAGS) -o $(TARGET) $(NDEBUG_LIB_OBJ) $(NDEBUG_MAIN_OBJ) $(LIBS) $(DEBUG_LDFLAGS) $(EXPORT_LDFLAGS)
+	$(CC) $(NDEBUG_CFLAGS) -o $(TARGET).test $(NDEBUG_LIB_OBJ) $(NDEBUG_TEST_OBJ) $(LIBS) $(DEBUG_LDFLAGS) $(EXPORT_LDFLAGS) -Itest
 	RAYFORCE_CORES=$(TEST_CORES) ./$(TARGET).test $(TEST_ARGS)
 
 # The suite over the .reltest.o flavour (see its pattern rule).  Does not

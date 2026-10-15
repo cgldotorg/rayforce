@@ -75,6 +75,10 @@ ray_t* ray_fn_vary(const char* name, uint8_t fn_attrs, ray_vary_fn fn) {
     return obj;
 }
 
+ray_t* ray_fn_host(const char* name, ray_host_fn fn) {
+    return ray_fn_vary(name, RAY_FN_NONE, fn);
+}
+
 /* ---- Global environment ---- */
 
 /* Spinlock protecting g_env mutations in ray_env_set */

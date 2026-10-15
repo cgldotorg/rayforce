@@ -718,6 +718,23 @@ ray_err_t ray_sym_load(const char* path);
 ray_t*    ray_env_get(int64_t sym_id);
 ray_err_t ray_env_set(int64_t sym_id, ray_t* val);
 
+/* ===== Host Functions =====
+ *
+ * A host function is called with `n` (0..64) evaluated, borrowed arguments:
+ * it never releases one (ray_retain an argument to return or keep it) and
+ * never writes through ray_data() of one.  It returns a new reference
+ * (RAY_NULL_OBJ for no value) or an error from ray_error(), never NULL.  It
+ * runs on the thread that evaluates, makes every ray_* call on that thread
+ * before it returns, and does not evaluate, bind, or do I/O: a restricted
+ * (-U) peer may call it, so its body is the trust boundary. */
+typedef ray_t* (*ray_host_fn)(ray_t** args, int64_t n);
+
+/* A Rayfall function value that calls `fn`.  Owned by the caller; bind it
+ * with ray_env_set (which retains) and release it.  `name` labels the value
+ * (its first 13 bytes are kept inline); it binds nothing.  The value is never
+ * restricted: a -U peer may call it.  Returns an "oom" error on failure. */
+ray_t* ray_fn_host(const char* name, ray_host_fn fn);
+
 /* ===== Table API =====
  *
  * Every function here that takes a `ray_t* tbl` is total over ray_t: handed a

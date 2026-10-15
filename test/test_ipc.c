@@ -916,6 +916,287 @@ static test_result_t test_ipc_poll_restricted_exit_denied(void) {
     PASS();
 }
 
+#ifndef RAY_OS_WINDOWS
+/* ---- ipc/hostfn: ray_fn_host and .sys.loadfn ----------------------------- */
+/*
+ * The server tests run the shipped binary the way a supervisor does,
+ * `./rayforce -f <script> --port 127.0.0.1:P -U <pw>`, with a launch script
+ * that binds build/libhostfn.so's hf_scale (test/hostfn/hostfn.c) through
+ * .sys.loadfn, and talk to it as a restricted peer.
+ */
+
+#include <fcntl.h>
+#include <limits.h>
+#include <signal.h>
+#include <sys/wait.h>
+
+#define HOSTFN_LIB "build/libhostfn.so"
+#define HOSTFN_PW  "hostfn-pw"
+
+typedef struct {
+    pid_t   pid;
+    int64_t h;
+    char    script[96];
+} hostfn_server_t;
+
+static uint16_t hostfn_free_port(void) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return 0;
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    uint16_t port = 0;
+    if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) == 0)
+        port = get_listen_port((ray_sock_t)fd);
+    close(fd);
+    return port;
+}
+
+static void hostfn_server_stop(hostfn_server_t* s) {
+    if (s->h >= 0) ray_ipc_close(s->h);
+    if (s->pid > 0) {
+        kill(s->pid, SIGTERM);
+        int status;
+        waitpid(s->pid, &status, 0);
+    }
+    unlink(s->script);
+}
+
+/* Writes the launch script, starts the server and connects as a restricted
+ * peer.  Returns NULL, or what went wrong. */
+static const char* hostfn_server_start(hostfn_server_t* s) {
+    s->pid = -1;
+    s->h = -1;
+    snprintf(s->script, sizeof(s->script), "/tmp/rf_hostfn_%d.rfl", (int)getpid());
+
+    char lib[PATH_MAX];
+    if (!realpath(HOSTFN_LIB, lib)) return "fixture " HOSTFN_LIB " not built";
+    FILE* f = fopen(s->script, "w");
+    if (!f) return "cannot write the launch script";
+    fprintf(f, "(set hf_scale (.sys.loadfn \"%s\" 'hf_scale))\n", lib);
+    fprintf(f, "(set load_it (fn [] (.sys.loadfn \"%s\" 'hf_scale)))\n", lib);
+    fclose(f);
+
+    uint16_t port = hostfn_free_port();
+    if (port == 0) return "no free port";
+    char listen_at[32];
+    snprintf(listen_at, sizeof(listen_at), "127.0.0.1:%u", (unsigned)port);
+
+    s->pid = fork();
+    if (s->pid < 0) return "fork failed";
+    if (s->pid == 0) {
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            dup2(devnull, STDIN_FILENO);
+            dup2(devnull, STDOUT_FILENO);
+        }
+        execl("./rayforce", "./rayforce", "-f", s->script, "--port", listen_at,
+              "-U", HOSTFN_PW, (char*)NULL);
+        _exit(127);
+    }
+
+    for (int attempt = 0; attempt < 200; attempt++) {
+        s->h = ray_ipc_connect("127.0.0.1", port, "peer", HOSTFN_PW, 1000);
+        if (s->h >= 0) return NULL;
+        int status;
+        if (waitpid(s->pid, &status, WNOHANG) == s->pid) {
+            s->pid = -1;
+            return "server exited before it answered";
+        }
+        sleep_ms(50);
+    }
+    return "server never answered";
+}
+
+/* Releases a reply, freeing it when it is an error (ray_release skips those). */
+static void hostfn_drop(ray_t* r) {
+    if (!r) return;
+    if (RAY_IS_ERR(r)) ray_error_free(r);
+    else ray_release(r);
+}
+
+/* The error code of `r`, or "<value>" when it is not an error. */
+static void hostfn_code(ray_t* r, char* buf, size_t bufsz) {
+    snprintf(buf, bufsz, "%s", (r && RAY_IS_ERR(r)) ? ray_err_code(r) : "<value>");
+}
+
+static ray_t* hostfn_send(int64_t h, const char* expr) {
+    ray_t* msg = ray_str(expr, strlen(expr));
+    ray_t* r = ray_ipc_send(h, msg);
+    ray_release(msg);
+    return r;
+}
+
+static bool f64_vec_is(ray_t* v, const double* want, int64_t n) {
+    if (!v || RAY_IS_ERR(v) || v->type != RAY_F64 || v->len != n) return false;
+    const double* got = (const double*)ray_data(v);
+    for (int64_t i = 0; i < n; i++)
+        if (got[i] != want[i]) return false;
+    return true;
+}
+
+static test_result_t test_ipc_hostfn_restricted_peer_calls_bound_fn(void) {
+    hostfn_server_t s;
+    const char* why = hostfn_server_start(&s);
+    if (why) { hostfn_server_stop(&s); FAIL(why); }
+
+    const double want1[] = { 2.0, 4.0, 6.0 };
+    ray_t* r1 = hostfn_send(s.h, "(hf_scale 2.0 [1.0 2.0 3.0])");
+    bool ok1 = f64_vec_is(r1, want1, 3);
+    char code1[16];
+    hostfn_code(r1, code1, sizeof(code1));
+
+    const double want2[] = { 2.0, 4.0 };
+    ray_t* r2 = hostfn_send(s.h, "(hf_scale 0.5 [4.0 8.0])");
+    bool ok2 = f64_vec_is(r2, want2, 2);
+
+    hostfn_drop(r1);
+    hostfn_drop(r2);
+    hostfn_server_stop(&s);
+    TEST_ASSERT_FMT(ok1 && ok2, "first call ok=%d (error %s), next call ok=%d",
+                    ok1, code1, ok2);
+    PASS();
+}
+
+static test_result_t test_ipc_hostfn_restricted_peer_loadfn_access(void) {
+    char lib[PATH_MAX];
+    TEST_ASSERT_NOT_NULL(realpath(HOSTFN_LIB, lib));
+    char direct_expr[PATH_MAX + 64];
+    snprintf(direct_expr, sizeof(direct_expr), "(.sys.loadfn \"%s\" 'hf_scale)", lib);
+
+    hostfn_server_t s;
+    const char* why = hostfn_server_start(&s);
+    if (why) { hostfn_server_stop(&s); FAIL(why); }
+
+    ray_t* direct = hostfn_send(s.h, direct_expr);
+    ray_t* via_lambda = hostfn_send(s.h, "(load_it)");
+    ray_t* next = hostfn_send(s.h, "(+ 3 4)");
+
+    char direct_code[16], lambda_code[16];
+    hostfn_code(direct, direct_code, sizeof(direct_code));
+    hostfn_code(via_lambda, lambda_code, sizeof(lambda_code));
+    bool next_ok = next && !RAY_IS_ERR(next) && next->i64 == 7;
+
+    hostfn_drop(direct);
+    hostfn_drop(via_lambda);
+    hostfn_drop(next);
+    hostfn_server_stop(&s);
+    TEST_ASSERT_FMT(strcmp(direct_code, "access") == 0 &&
+                        strcmp(lambda_code, "access") == 0 && next_ok,
+                    "direct=%s via_lambda=%s next_answered=%d",
+                    direct_code, lambda_code, next_ok);
+    PASS();
+}
+
+static test_result_t test_ipc_hostfn_restricted_peer_receives_host_error(void) {
+    hostfn_server_t s;
+    const char* why = hostfn_server_start(&s);
+    if (why) { hostfn_server_stop(&s); FAIL(why); }
+
+    ray_t* err = hostfn_send(s.h, "(hf_scale 2.0)");
+    char code[16];
+    hostfn_code(err, code, sizeof(code));
+
+    const double want[] = { 3.0 };
+    ray_t* next = hostfn_send(s.h, "(hf_scale 3.0 [1.0])");
+    bool next_ok = f64_vec_is(next, want, 1);
+
+    hostfn_drop(err);
+    hostfn_drop(next);
+    hostfn_server_stop(&s);
+    TEST_ASSERT_FMT(strcmp(code, "arity") == 0 && next_ok,
+                    "host error code=%s next_answered=%d", code, next_ok);
+    PASS();
+}
+
+static test_result_t test_ipc_hostfn_loadfn_errors_io_and_name(void) {
+    char not_lib[PATH_MAX], lib[PATH_MAX];
+    TEST_ASSERT_NOT_NULL(realpath("Makefile", not_lib));
+    TEST_ASSERT_NOT_NULL(realpath(HOSTFN_LIB, lib));
+
+    char expr[PATH_MAX + 64];
+    snprintf(expr, sizeof(expr), "(.sys.loadfn \"%s\" 'hf_scale)", not_lib);
+    ray_t* bad_path = ray_eval_str(expr);
+    snprintf(expr, sizeof(expr), "(.sys.loadfn \"%s\" 'hf_absent)", lib);
+    ray_t* bad_sym = ray_eval_str(expr);
+    ray_t* next = ray_eval_str("(+ 3 4)");
+
+    char path_code[16], sym_code[16];
+    hostfn_code(bad_path, path_code, sizeof(path_code));
+    hostfn_code(bad_sym, sym_code, sizeof(sym_code));
+    bool next_ok = !RAY_IS_ERR(next) && next->i64 == 7;
+
+    hostfn_drop(bad_path);
+    hostfn_drop(bad_sym);
+    hostfn_drop(next);
+    TEST_ASSERT_FMT(strcmp(path_code, "io") == 0 && strcmp(sym_code, "name") == 0 && next_ok,
+                    "not a library=%s absent symbol=%s next_answered=%d",
+                    path_code, sym_code, next_ok);
+    PASS();
+}
+
+/* (hf_mix a b) = 10a + b over two I64 atoms. */
+static ray_t* hf_mix(ray_t** args, int64_t n) {
+    if (n != 2) return ray_error("arity", NULL);
+    if (args[0]->type != -RAY_I64 || args[1]->type != -RAY_I64)
+        return ray_error("type", NULL);
+    return ray_i64(10 * args[0]->i64 + args[1]->i64);
+}
+
+/* (hf_keep x): x itself, retained. */
+static ray_t* hf_keep(ray_t** args, int64_t n) {
+    if (n != 1) return ray_error("arity", NULL);
+    ray_retain(args[0]);
+    return args[0];
+}
+
+static bool hostfn_bind(const char* name, ray_host_fn fn) {
+    ray_t* val = ray_fn_host(name, fn);
+    if (RAY_IS_ERR(val)) return false;
+    ray_err_t rc = ray_env_set(ray_sym_intern(name, strlen(name)), val);
+    ray_release(val);
+    return rc == RAY_OK;
+}
+
+static test_result_t test_ipc_hostfn_embedder_call(void) {
+    TEST_ASSERT_TRUE(hostfn_bind("hf_mix", hf_mix));
+    ray_t* r = ray_eval_str("(hf_mix 3 4)");
+    char code[16];
+    hostfn_code(r, code, sizeof(code));
+    bool ok = !RAY_IS_ERR(r) && r->type == -RAY_I64 && r->i64 == 34;
+    long long got = RAY_IS_ERR(r) ? 0 : (long long)r->i64;
+    hostfn_drop(r);
+    TEST_ASSERT_FMT(ok, "(hf_mix 3 4) gave %lld (error %s)", got, code);
+    PASS();
+}
+
+static test_result_t test_ipc_hostfn_returned_arg_refcount_balanced(void) {
+    TEST_ASSERT_TRUE(hostfn_bind("hf_keep", hf_keep));
+    ray_t* v = ray_vec_new(RAY_I64, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(v));
+    int64_t* d = (int64_t*)ray_data(v);
+    d[0] = 1; d[1] = 2; d[2] = 3;
+    v->len = 3;
+    TEST_ASSERT_EQ_I(ray_env_set(ray_sym_intern("hf_v", 4), v), RAY_OK);
+    uint32_t rc_before = v->rc;
+
+    int same = 0;
+    for (int i = 0; i < 100; i++) {
+        ray_t* r = ray_eval_str("(hf_keep hf_v)");
+        if (r == v) same++;
+        hostfn_drop(r);
+    }
+    uint32_t rc_after = v->rc;
+    ray_release(v);
+    TEST_ASSERT_FMT(same == 100 && rc_after == rc_before,
+                    "returned the argument %d/100 times; rc %u before, %u after",
+                    same, rc_before, rc_after);
+    PASS();
+}
+#endif /* !RAY_OS_WINDOWS */
+
 /* ---- test_ipc_poll_auth_creds_path ------------------------------------- */
 /*
  * Poll-based auth happy path — exercises ipc_read_creds (lines 503-541) and
@@ -3089,6 +3370,14 @@ const test_entry_t ipc_entries[] = {
     { "ipc/poll_based_listen",          test_ipc_poll_based_listen,              ipc_setup, ipc_teardown },
     { "ipc/poll_public_restricted",     test_ipc_poll_public_restricted,         ipc_setup, ipc_teardown },
     { "ipc/poll_restricted_exit_denied", test_ipc_poll_restricted_exit_denied,   ipc_setup, ipc_teardown },
+#ifndef RAY_OS_WINDOWS
+    { "ipc/hostfn/restricted_peer_calls_bound_fn",     test_ipc_hostfn_restricted_peer_calls_bound_fn,     ipc_setup, ipc_teardown },
+    { "ipc/hostfn/restricted_peer_loadfn_access",      test_ipc_hostfn_restricted_peer_loadfn_access,      ipc_setup, ipc_teardown },
+    { "ipc/hostfn/restricted_peer_receives_host_error", test_ipc_hostfn_restricted_peer_receives_host_error, ipc_setup, ipc_teardown },
+    { "ipc/hostfn/loadfn_errors_io_and_name",          test_ipc_hostfn_loadfn_errors_io_and_name,          ipc_setup, ipc_teardown },
+    { "ipc/hostfn/embedder_call",                      test_ipc_hostfn_embedder_call,                      ipc_setup, ipc_teardown },
+    { "ipc/hostfn/returned_arg_refcount_balanced",     test_ipc_hostfn_returned_arg_refcount_balanced,     ipc_setup, ipc_teardown },
+#endif
     { "ipc/poll_auth_creds_path",        test_ipc_poll_auth_creds_path,           ipc_setup, ipc_teardown },
     { "ipc/poll_auth_reject",           test_ipc_poll_auth_reject,               ipc_setup, ipc_teardown },
     { "ipc/poll_handshake_version_mismatch", test_ipc_poll_handshake_version_mismatch, ipc_setup, ipc_teardown },

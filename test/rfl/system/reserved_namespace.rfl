@@ -23,8 +23,8 @@
 (type .fs) -- 'DICT
 (type .ipc) -- 'DICT
 (type .csv) -- 'DICT
-(count .sys) -- 12
-;; gc, exec, build, mem, info, cmd, timeit, listen, env, args, prof, querylog
+(count .sys) -- 13
+;; gc, exec, build, mem, info, cmd, timeit, listen, loadfn, env, args, prof, querylog
 (count .os) -- 2
 ;; getenv, setenv
 (count .fs) -- 2
@@ -72,6 +72,7 @@
 ;; The remaining builtins are harder to call without side effects;
 ;; `nil?` proves the binding resolves to a non-null callable.
 (nil? .sys.exec) -- false
+(nil? .sys.loadfn) -- false
 (nil? .sys.info) -- false
 (nil? .sys.mem) -- false
 (nil? .sys.build) -- false
