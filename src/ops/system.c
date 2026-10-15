@@ -1160,8 +1160,11 @@ ray_t* ray_system_fn(ray_t** args, int64_t n) {
  * pointer into it.  Registered RAY_FN_RESTRICTED, so a -U peer gets `access`
  * before this runs. */
 ray_t* ray_sys_loadfn_fn(ray_t* path, ray_t* sym) {
-    if (path->type != -RAY_STR || sym->type != -RAY_SYM)
-        return ray_error("type", ".sys.loadfn expects a path string and a symbol");
+    if (path->type != -RAY_STR)
+        return ray_error("type", ".sys.loadfn expects a path string, got %s", ray_type_name(path->type));
+    char name[256];
+    ray_t* err = sym_to_cname(".sys.loadfn", "symbol", sym, name, sizeof(name));
+    if (err) return err;
 #if defined(RAY_OS_WINDOWS)
     return ray_error("nyi", ".sys.loadfn: no loader on Windows");
 #elif defined(RAY_FUZZING)
@@ -1172,11 +1175,6 @@ ray_t* ray_sys_loadfn_fn(ray_t* path, ray_t* sym) {
     if (!p)
         return ray_error("io", ".sys.loadfn: path is empty or too long, got %lld bytes",
                          (long long)ray_str_len(path));
-
-    ray_t* name_atom = ray_sym_str(sym->i64);
-    char namebuf[256];
-    const char* name = name_atom ? str_to_cpath(name_atom, namebuf, sizeof(namebuf)) : NULL;
-    if (!name) return ray_error("name", ".sys.loadfn: symbol name is empty or too long");
 
     void* lib = dlopen(p, RTLD_NOW | RTLD_LOCAL);
     if (!lib) {
