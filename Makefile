@@ -445,8 +445,8 @@ TSAN_ENV     = TSAN_OPTIONS="suppressions=$(PWD)/.tsan-suppressions history_size
 tsan: $(TSAN_LIB_OBJ) $(TSAN_MAIN_OBJ)
 	$(CLANG) $(TSAN_CFLAGS) -o $(TARGET).tsan $(TSAN_LIB_OBJ) $(TSAN_MAIN_OBJ) $(LIBS) $(TSAN_LDFLAGS)
 
-tsan-test: $(TSAN_LIB_OBJ) $(TSAN_TEST_OBJ)
-	$(CLANG) $(TSAN_CFLAGS) -o $(TARGET).test.tsan $(TSAN_LIB_OBJ) $(TSAN_TEST_OBJ) $(LIBS) $(TSAN_LDFLAGS) -Itest
+tsan-test: $(TSAN_LIB_OBJ) $(TSAN_TEST_OBJ) $(HOSTFN_LIB)
+	$(CLANG) $(TSAN_CFLAGS) -o $(TARGET).test.tsan $(TSAN_LIB_OBJ) $(TSAN_TEST_OBJ) $(LIBS) $(TSAN_LDFLAGS) $(EXPORT_LDFLAGS) -Itest
 	RAYFORCE_CORES=$(TSAN_CORES) $(TSAN_ENV) ./$(TARGET).test.tsan $(if $(TSAN_FILTER),-f $(TSAN_FILTER),)
 
 # ─── Hardened cloud tier ────────────────────────────────────────────
