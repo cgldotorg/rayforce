@@ -202,10 +202,11 @@ Returns the partition name as a `sym` atom.
 ```lisp
 (.db.parted.drop dbroot '2024.01.15 'trades)
 ;; => '2024.01.15
-(count (.db.parted.get dbroot 'trades))   ; only 2024.01.16's rows remain
+;; only 2024.01.16's rows remain
+(count (.db.parted.get dbroot 'trades))
 ```
 
-Errors: `domain` (arity != 3, or a partition or table name that is not a partition directory name or a table name), `type` (root not a string, partition or name not a sym), `range` (the joined path exceeds 1023 bytes), `io` (the partition has no such table, including an absent root or partition, or the directory change could not be synced).
+Errors: `domain` (arity != 3, or a partition or table name that is not a partition directory name or a table name), `type` (root not a string, partition or name not a sym), `range` (`db_root/.drop-partition-tbl_name`, the hidden name the table is renamed to and the longest path the drop builds, exceeds 1023 bytes), `io` (the partition has no such table, including an absent root or partition, or the directory change could not be synced).
 
 ## See also
 
