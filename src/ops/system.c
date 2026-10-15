@@ -281,6 +281,23 @@ ray_t* ray_get_splayed_fn(ray_t** args, int64_t n) {
     return ray_read_splayed(dir, sym_path);
 }
 
+/* Copy a sym atom's name into buf.  Returns NULL on success, else the error
+ * that `verb` reports for its `what` argument. */
+static ray_t* sym_to_cname(const char* verb, const char* what, ray_t* s,
+                           char* buf, size_t bufsz) {
+    if (!s || s->type != -RAY_SYM)
+        return ray_error("type", "%s expects a sym %s, got %s", verb, what, ray_type_name(s->type));
+    ray_t* name_atom = ray_sym_str(s->i64);
+    if (!name_atom) return ray_error("name", NULL);
+
+    size_t nlen = ray_str_len(name_atom);
+    if (nlen == 0 || nlen >= bufsz)
+        return ray_error("domain", "%s %s length out of range, got %lld", verb, what, (long long)nlen);
+    memcpy(buf, ray_str_ptr(name_atom), nlen);
+    buf[nlen] = '\0';
+    return NULL;
+}
+
 /* (.db.parted.get "db_root" `table_name) -- load partitioned table */
 ray_t* ray_get_parted_fn(ray_t** args, int64_t n) {
     if (n != 2)
@@ -290,18 +307,9 @@ ray_t* ray_get_parted_fn(ray_t** args, int64_t n) {
     if (!str_to_cpath(args[0], root, sizeof(root)))
         return ray_error("type", ".db.parted.get expects a string db root path, got %s", ray_type_name(args[0]->type));
 
-    /* Table name as symbol atom */
-    if (!args[1] || args[1]->type != -RAY_SYM)
-        return ray_error("type", ".db.parted.get expects a sym table name, got %s", ray_type_name(args[1]->type));
-    ray_t* name_atom = ray_sym_str(args[1]->i64);
-    if (!name_atom) return ray_error("name", NULL);
-
     char name[256];
-    size_t nlen = ray_str_len(name_atom);
-    if (nlen == 0 || nlen >= sizeof(name))
-        return ray_error("domain", ".db.parted.get table name length out of range, got %lld", (long long)nlen);
-    memcpy(name, ray_str_ptr(name_atom), nlen);
-    name[nlen] = '\0';
+    ray_t* err = sym_to_cname(".db.parted.get", "table name", args[1], name, sizeof(name));
+    if (err) return err;
 
     return ray_read_parted(root, name);
 }
@@ -331,23 +339,6 @@ ray_t* ray_fill_parted_fn(ray_t** args, int64_t n) {
         return ray_error("type", ".db.parted.fill expects a string db root path, got %s", ray_type_name(args[0]->type));
 
     return ray_parted_fill(root);
-}
-
-/* Copy a sym atom's name into buf.  Returns NULL on success, else the error
- * that `verb` reports for its `what` argument. */
-static ray_t* sym_to_cname(const char* verb, const char* what, ray_t* s,
-                           char* buf, size_t bufsz) {
-    if (!s || s->type != -RAY_SYM)
-        return ray_error("type", "%s expects a sym %s, got %s", verb, what, ray_type_name(s->type));
-    ray_t* name_atom = ray_sym_str(s->i64);
-    if (!name_atom) return ray_error("name", NULL);
-
-    size_t nlen = ray_str_len(name_atom);
-    if (nlen == 0 || nlen >= bufsz)
-        return ray_error("domain", "%s %s length out of range, got %lld", verb, what, (long long)nlen);
-    memcpy(buf, ray_str_ptr(name_atom), nlen);
-    buf[nlen] = '\0';
-    return NULL;
 }
 
 /* (.db.parted.drop "db_root" 'partition 'table_name) → the partition name.
