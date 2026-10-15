@@ -945,10 +945,10 @@ static uint16_t hostfn_free_port(void) {
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = 0;
     uint16_t port = 0;
-    if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) == 0)
+    if (inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) == 1 &&
+        bind(fd, (struct sockaddr*)&addr, sizeof(addr)) == 0)
         port = get_listen_port((ray_sock_t)fd);
     close(fd);
     return port;
