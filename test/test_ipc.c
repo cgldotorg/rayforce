@@ -922,7 +922,9 @@ static test_result_t test_ipc_poll_restricted_exit_denied(void) {
  * The server tests run the shipped binary the way a supervisor does,
  * `./rayforce -f <script> --port 127.0.0.1:P -U <pw>`, with a launch script
  * that binds build/libhostfn.so's hf_scale and hf_fail (test/hostfn/hostfn.c)
- * through .sys.loadfn, and talk to it as a restricted peer.
+ * through .sys.loadfn, and talk to it as a restricted peer.  The peer's
+ * refused .sys.loadfn calls name build/libhostfn_mark.so
+ * (test/hostfn/hostfn_mark.c), which leaves a marker file when it is opened.
  */
 
 #include <fcntl.h>
@@ -931,6 +933,7 @@ static test_result_t test_ipc_poll_restricted_exit_denied(void) {
 #include <sys/wait.h>
 
 #define HOSTFN_LIB "build/libhostfn.so"
+#define HOSTFN_MARK_LIB "build/libhostfn_mark.so"
 #define HOSTFN_PW  "hostfn-pw"
 
 typedef struct {
@@ -971,13 +974,14 @@ static const char* hostfn_server_start(hostfn_server_t* s) {
     s->h = -1;
     snprintf(s->script, sizeof(s->script), "/tmp/rf_hostfn_%d.rfl", (int)getpid());
 
-    char lib[PATH_MAX];
+    char lib[PATH_MAX], mark_lib[PATH_MAX];
     if (!realpath(HOSTFN_LIB, lib)) return "fixture " HOSTFN_LIB " not built";
+    if (!realpath(HOSTFN_MARK_LIB, mark_lib)) return "fixture " HOSTFN_MARK_LIB " not built";
     FILE* f = fopen(s->script, "w");
     if (!f) return "cannot write the launch script";
     fprintf(f, "(set hf_scale (.sys.loadfn \"%s\" 'hf_scale))\n", lib);
     fprintf(f, "(set hf_fail (.sys.loadfn \"%s\" 'hf_fail))\n", lib);
-    fprintf(f, "(set load_it (fn [] (.sys.loadfn \"%s\" 'hf_scale)))\n", lib);
+    fprintf(f, "(set load_it (fn [] (.sys.loadfn \"%s\" 'hf_mark)))\n", mark_lib);
     fclose(f);
 
     uint16_t port = hostfn_free_port();
@@ -1062,14 +1066,16 @@ static test_result_t test_ipc_hostfn_restricted_peer_calls_bound_fn(void) {
 }
 
 static test_result_t test_ipc_hostfn_restricted_peer_loadfn_access(void) {
-    char lib[PATH_MAX];
-    TEST_ASSERT_NOT_NULL(realpath(HOSTFN_LIB, lib));
+    char mark_lib[PATH_MAX];
+    TEST_ASSERT_NOT_NULL(realpath(HOSTFN_MARK_LIB, mark_lib));
     char direct_expr[PATH_MAX + 64];
-    snprintf(direct_expr, sizeof(direct_expr), "(.sys.loadfn \"%s\" 'hf_scale)", lib);
+    snprintf(direct_expr, sizeof(direct_expr), "(.sys.loadfn \"%s\" 'hf_mark)", mark_lib);
 
     hostfn_server_t s;
     const char* why = hostfn_server_start(&s);
     if (why) { hostfn_server_stop(&s); FAIL(why); }
+    char marker[64];
+    snprintf(marker, sizeof(marker), "/tmp/rf_hostfn_mark_%d", (int)s.pid);
 
     ray_t* direct = hostfn_send(s.h, direct_expr);
     ray_t* via_lambda = hostfn_send(s.h, "(load_it)");
@@ -1079,15 +1085,17 @@ static test_result_t test_ipc_hostfn_restricted_peer_loadfn_access(void) {
     hostfn_code(direct, direct_code, sizeof(direct_code));
     hostfn_code(via_lambda, lambda_code, sizeof(lambda_code));
     bool next_ok = next && !RAY_IS_ERR(next) && next->i64 == 7;
+    bool not_loaded = access(marker, F_OK) != 0;
 
     hostfn_drop(direct);
     hostfn_drop(via_lambda);
     hostfn_drop(next);
     hostfn_server_stop(&s);
+    unlink(marker);
     TEST_ASSERT_FMT(strcmp(direct_code, "access") == 0 &&
-                        strcmp(lambda_code, "access") == 0 && next_ok,
-                    "direct=%s via_lambda=%s next_answered=%d",
-                    direct_code, lambda_code, next_ok);
+                        strcmp(lambda_code, "access") == 0 && not_loaded && next_ok,
+                    "direct=%s via_lambda=%s library_not_loaded=%d next_answered=%d",
+                    direct_code, lambda_code, not_loaded, next_ok);
     PASS();
 }
 

@@ -380,12 +380,12 @@ TEST_CORES ?= 2
 TEST_FILTER ?=
 TEST_ARGS = $(if $(TEST_FILTER),-f $(TEST_FILTER),)
 
-# The host-function fixture the ipc/hostfn tests load with .sys.loadfn: a
-# shared library that leaves its ray_* references for the executable to
+# The host-function fixtures the ipc/hostfn tests name in .sys.loadfn calls:
+# shared libraries that leave their ray_* references for the executable to
 # resolve.  POSIX only; on Windows the loader answers `nyi`.
 ifneq ($(RAY_WINDOWS),1)
-HOSTFN_LIB = build/libhostfn.so
-$(HOSTFN_LIB): test/hostfn/hostfn.c include/rayforce.h
+HOSTFN_LIBS = build/libhostfn.so build/libhostfn_mark.so
+build/lib%.so: test/hostfn/%.c include/rayforce.h
 	@mkdir -p build
 	$(CC) -shared -fPIC $(WARNS) -std=$(STD) -g -O0 -Iinclude -o $@ $< $(HOSTFN_LDFLAGS)
 endif
@@ -395,14 +395,14 @@ endif
 # must exist on disk and share the build flavour (sanitizers, coverage).
 test: CFLAGS = $(DEBUG_CFLAGS)
 test: LDFLAGS = $(DEBUG_LDFLAGS)
-test: $(LIB_OBJ) $(MAIN_OBJ) $(TEST_OBJ) $(HOSTFN_LIB)
+test: $(LIB_OBJ) $(MAIN_OBJ) $(TEST_OBJ) $(HOSTFN_LIBS)
 	$(CC) $(CFLAGS) -o $(TARGET) $(LIB_OBJ) $(MAIN_OBJ) $(LIBS) $(LDFLAGS) $(EXPORT_LDFLAGS)
 	$(CC) $(CFLAGS) -o $(TARGET).test $(LIB_OBJ) $(TEST_OBJ) $(LIBS) $(LDFLAGS) $(EXPORT_LDFLAGS) -Itest
 	RAYFORCE_CORES=$(TEST_CORES) ./$(TARGET).test $(TEST_ARGS)
 
 # The suite with every assert() compiled out (see NDEBUG_CFLAGS).  Relinks
 # ./$(TARGET) in the same flavour, as `test` does, for the IPC-diff tests.
-test-ndebug: $(NDEBUG_LIB_OBJ) $(NDEBUG_MAIN_OBJ) $(NDEBUG_TEST_OBJ) $(HOSTFN_LIB)
+test-ndebug: $(NDEBUG_LIB_OBJ) $(NDEBUG_MAIN_OBJ) $(NDEBUG_TEST_OBJ) $(HOSTFN_LIBS)
 	$(CC) $(NDEBUG_CFLAGS) -o $(TARGET) $(NDEBUG_LIB_OBJ) $(NDEBUG_MAIN_OBJ) $(LIBS) $(DEBUG_LDFLAGS) $(EXPORT_LDFLAGS)
 	$(CC) $(NDEBUG_CFLAGS) -o $(TARGET).test $(NDEBUG_LIB_OBJ) $(NDEBUG_TEST_OBJ) $(LIBS) $(DEBUG_LDFLAGS) $(EXPORT_LDFLAGS) -Itest
 	RAYFORCE_CORES=$(TEST_CORES) ./$(TARGET).test $(TEST_ARGS)
@@ -445,7 +445,7 @@ TSAN_ENV     = TSAN_OPTIONS="suppressions=$(PWD)/.tsan-suppressions history_size
 tsan: $(TSAN_LIB_OBJ) $(TSAN_MAIN_OBJ)
 	$(CLANG) $(TSAN_CFLAGS) -o $(TARGET).tsan $(TSAN_LIB_OBJ) $(TSAN_MAIN_OBJ) $(LIBS) $(TSAN_LDFLAGS)
 
-tsan-test: $(TSAN_LIB_OBJ) $(TSAN_TEST_OBJ) $(HOSTFN_LIB)
+tsan-test: $(TSAN_LIB_OBJ) $(TSAN_TEST_OBJ) $(HOSTFN_LIBS)
 	$(CLANG) $(TSAN_CFLAGS) -o $(TARGET).test.tsan $(TSAN_LIB_OBJ) $(TSAN_TEST_OBJ) $(LIBS) $(TSAN_LDFLAGS) $(EXPORT_LDFLAGS) -Itest
 	RAYFORCE_CORES=$(TSAN_CORES) $(TSAN_ENV) ./$(TARGET).test.tsan $(if $(TSAN_FILTER),-f $(TSAN_FILTER),)
 
