@@ -2,8 +2,13 @@ name: Northline
 
 # Builds, tests and packages the northline branch on Linux and macOS, and on a
 # push publishes both tarballs to a pre-release tagged
-# northline-<YYYYMMDD>-<sha8>. The inherited workflows stay in the tree and are
-# disabled as a repository setting, so a rebase onto dev never conflicts.
+# northline-<YYYYMMDD>-<sha8>. The eight inherited workflows stay in the tree,
+# so a rebase onto dev never conflicts. rayforce-audit.yml, which a pull
+# request into any branch starts, and rayforce-audit-comment.yml, which runs
+# after it, are disabled in the fork's Actions settings. The other six (ci,
+# nightly, pages, release, retarget-prs, version-guard) are not registered on
+# the fork, and their triggers name only master, dev, a schedule or a manual
+# dispatch.
 
 on:
   push:
