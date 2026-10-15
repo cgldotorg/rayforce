@@ -1,0 +1,115 @@
+name: Northline
+
+# Builds, tests and packages the northline branch on Linux and macOS, and on a
+# push publishes both tarballs to a pre-release tagged
+# northline-<YYYYMMDD>-<sha8>. The inherited workflows stay in the tree and are
+# disabled as a repository setting, so a rebase onto dev never conflicts.
+
+on:
+  push:
+    branches: [northline]
+  pull_request:
+    branches: [northline]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      # Full history: the Makefile reads the version from `git describe --tags`.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # `make dist` relinks the .rel.o objects `make release` leaves, and make
+      # does not track flag changes, so both run at the distributable march.
+      - name: Release build (-Werror)
+        run: make release RAY_MARCH=x86-64-v3
+
+      - name: Test (ASan + UBSan)
+        run: make test
+
+      # As ci.yml's tsan job runs it.
+      - name: TSan concurrency suites
+        env:
+          RAY_MARCH: x86-64
+        run: |
+          for f in pool heap parallel stress store/parted_concurrent_mounts; do
+            echo "::group::tsan -f $f"
+            make tsan-test TSAN_FILTER=$f || exit 1
+            echo "::endgroup::"
+          done
+
+      - name: Package
+        run: make dist RAY_MARCH=x86-64-v3
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Release build (-Werror)
+        run: make release
+
+      - name: Test (ASan + UBSan)
+        timeout-minutes: 45
+        run: make test
+
+      # release.yml: the macOS runner is the oldest Apple-Silicon class, so
+      # native is a safe floor there.
+      - name: Package
+        run: make dist RAY_MARCH=native
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-macos
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push'
+    needs: [linux, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          ls -l dist
+          tag="northline-$(date -u +%Y%m%d)-${SHA:0:8}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/*.tar.gz dist/*.sha256 --clobber
+          else
+            gh release create "$tag" dist/*.tar.gz dist/*.sha256 \
+              --target "$SHA" \
+              --title "$tag" \
+              --notes "northline at $SHA" \
+              --prerelease
+          fi
