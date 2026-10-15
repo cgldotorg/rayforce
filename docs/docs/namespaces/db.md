@@ -8,7 +8,7 @@ Persist and reload tables. Rayforce stores tables in two on-disk shapes:
 The `get` builtins memory-map every column file — load is constant-time regardless of dataset size. `set` writes a table's columns to a splayed directory. A loaded parted table can also grow an in-memory live tail with `insert`; that operation is deliberately separate from persistence.
 
 !!! note "Restricted under `-U`"
-    `.db.splayed.set` and `.db.parted.fill` are `RAY_FN_RESTRICTED` (they write to disk). The `get`/`tables` builtins are read-only and unrestricted.
+    `.db.splayed.set`, `.db.parted.fill` and `.db.parted.drop` are `RAY_FN_RESTRICTED` (they write to disk). The `get`/`tables` builtins are read-only and unrestricted.
 
 ## Reference
 
@@ -19,6 +19,7 @@ The `get` builtins memory-map every column file — load is constant-time regard
 | [`.db.parted.get`](#db-parted-get) | variadic | — | Load a partitioned table by name from a db root. |
 | [`.db.parted.tables`](#db-parted-tables) | variadic | — | List the table names available under a parted db root. |
 | [`.db.parted.fill`](#db-parted-fill) | variadic | restricted | Fill missing tables across a parted db's partitions. |
+| [`.db.parted.drop`](#db-parted-drop) | variadic | restricted | Remove one table from one partition of a parted db. |
 
 ## `.db.splayed.set` { #db-splayed-set }
 
@@ -187,6 +188,24 @@ Returns a sorted `sym` vector of the partition names that were filled (an **empt
 ```
 
 The filled copies are empty, so aggregate results across the db are unchanged — only the on-disk uniformity is. An existing root with no partition directories is a no-op: the call returns an empty `sym` vector. Errors: `domain` (arity != 1), `type` (root not a string), `io` (root missing or unreadable), plus any `oom`/`corrupt` surfaced while reading a template or writing a copy.
+
+## `.db.parted.drop` { #db-parted-drop }
+
+Signature: `(.db.parted.drop "db_root" 'partition 'tbl_name)`. The partition and the table name are quoted symbol atoms, as `.db.parted.fill` returns partition names (e.g. `'2024.01.15`).
+
+Removes `db_root/partition/tbl_name`. When no other table remains in that partition, the partition directory goes with it, so the next `.db.parted.get` no longer lists the partition. A partition that still holds another table stays; until that table is dropped from it too, it is a partition without `tbl_name` and `.db.parted.get` of `tbl_name` fails on it, as it does for any partition missing the table.
+
+The table directory is first renamed out of the partition to a hidden name under `db_root`, so a concurrent `.db.parted.get` sees the table either whole or gone, never half-deleted. The partition and root directories are fsynced before the renamed files are deleted: the drop is durable when the call returns. A view loaded earlier keeps its rows; its mappings stay valid until it is released.
+
+Returns the partition name as a `sym` atom.
+
+```lisp
+(.db.parted.drop dbroot '2024.01.15 'trades)
+;; => '2024.01.15
+(count (.db.parted.get dbroot 'trades))   ; only 2024.01.16's rows remain
+```
+
+Errors: `domain` (arity != 3, or a partition or table name that is not a partition directory name or a table name), `type` (root not a string, partition or name not a sym), `range` (the joined path exceeds 1023 bytes), `io` (the partition has no such table, including an absent root or partition, or the directory change could not be synced).
 
 ## See also
 

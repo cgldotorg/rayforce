@@ -6397,6 +6397,51 @@ static test_result_t test_ipc_restricted(void) {
     PASS();
 }
 
+/* ---- IPC restricted mode: .db.parted.drop ------------------------------- */
+
+#define TMP_DROP_RO_DB "/tmp/rayforce_test_parted_drop_ro"
+
+static test_result_t test_ipc_restricted_parted_drop(void) {
+    ray_runtime_t* rt = ray_runtime_create(0, NULL);
+    ray_test_client_poll();
+    TEST_ASSERT_NOT_NULL(rt);
+
+    (void)ray_test_rm_rf(TMP_DROP_RO_DB);
+    int64_t raw[] = {1, 2, 3};
+    ray_t* col = ray_vec_from_raw(RAY_I64, raw, 3);
+    ray_t* tbl = ray_table_add_col(ray_table_new(1), ray_sym_intern("v", 1), col);
+    TEST_ASSERT_EQ_I(ray_splay_save(tbl, TMP_DROP_RO_DB "/2024.01.01/t", NULL), RAY_OK);
+    ray_release(col);
+    ray_release(tbl);
+
+    ray_test_server_t srv;
+    RAY_TEST_SERVER_START_OPTS(srv, "secret123", true);
+    int64_t h = ray_ipc_connect("127.0.0.1", srv.port, "admin", "secret123", 0);
+    TEST_ASSERT((h) >= (0), "h >= 0");
+
+    const char* q = "(.db.parted.drop \"" TMP_DROP_RO_DB "\" '2024.01.01 't)";
+    ray_t* msg = ray_str(q, strlen(q));
+    ray_t* r = ray_ipc_send(h, msg);
+    ray_release(msg);
+    TEST_ASSERT_NOT_NULL(r);
+    TEST_ASSERT_TRUE(RAY_IS_ERR(r));
+    TEST_ASSERT_STR_EQ(ray_err_code(r), "access");
+    ray_release(r);
+
+    ray_ipc_close(h);
+    ray_test_server_stop(&srv);
+    ray_test_client_poll_done();
+
+    ray_t* parted = ray_read_parted(TMP_DROP_RO_DB, "t");
+    TEST_ASSERT_FALSE(RAY_IS_ERR(parted));
+    TEST_ASSERT_EQ_I(ray_table_nrows(parted), 3);
+    ray_release(parted);
+
+    (void)ray_test_rm_rf(TMP_DROP_RO_DB);
+    ray_runtime_destroy(rt);
+    PASS();
+}
+
 /* ---- IPC handshake rejects wrong wire version -------------------------- */
 
 static test_result_t test_ipc_handshake_version_mismatch(void) {
@@ -8539,6 +8584,7 @@ const test_entry_t store_entries[] = {
     { "store/ipc/auth_reject", test_ipc_auth_reject, NULL, NULL },
     { "store/ipc/auth_no_creds", test_ipc_auth_no_creds, NULL, NULL },
     { "store/ipc/restricted", test_ipc_restricted, NULL, NULL },
+    { "store/ipc/restricted_parted_drop", test_ipc_restricted_parted_drop, NULL, NULL },
     { "store/ipc/handshake_version_mismatch", test_ipc_handshake_version_mismatch, NULL, NULL },
     { NULL, NULL, NULL, NULL },
 };

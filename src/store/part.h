@@ -64,5 +64,12 @@ ray_t*    ray_parted_fill(const char* db_root);
  * error (`oom`; `nyi` for a type without a null fill). */
 struct ray_sym_domain_s;
 ray_t*    ray_null_fill(int8_t type, int64_t rows, struct ray_sym_domain_s* dom);
+/* Remove table_name from one partition of a parted db, and the partition
+ * directory with it when no other table remains there; the directory
+ * changes are fsynced before this returns.  Returns the partition name as a
+ * RAY_SYM atom, or an error: `io` when the partition has no such table,
+ * `domain` for a name that is not a partition or table name. */
+ray_t*    ray_parted_drop(const char* db_root, const char* partition,
+                          const char* table_name);
 
 #endif /* RAY_PART_H */

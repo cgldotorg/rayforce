@@ -1,0 +1,25 @@
+;; @requires: posix  (fixtures/checks run through a POSIX shell via .sys.exec)
+;; .db.parted.drop removes one table from one partition of a parted db, and
+;; the partition with it when no other table remains there.
+
+(.sys.exec "rm -rf /tmp/rfl_parted_drop") -- 0
+(.db.splayed.set "/tmp/rfl_parted_drop/2024.01.15/trades" (table [px] (list [1 2 3])))
+(.db.splayed.set "/tmp/rfl_parted_drop/2024.01.16/trades" (table [px] (list [40 50])))
+(count (.db.parted.get "/tmp/rfl_parted_drop" 'trades)) -- 5
+
+;; Dropping a day's only table removes the day: one partition is left.
+(.db.parted.drop "/tmp/rfl_parted_drop" '2024.01.15 'trades) -- '2024.01.15
+(set T (.db.parted.get "/tmp/rfl_parted_drop" 'trades))
+(list (count T) (sum (at T 'px))) -- (list 2 90)
+
+;; A day that still holds another table stays, and that table still reads.
+(.db.splayed.set "/tmp/rfl_parted_drop/2024.01.16/quotes" (table [bid] (list [7 8])))
+(.db.parted.drop "/tmp/rfl_parted_drop" '2024.01.16 'trades) -- '2024.01.16
+(count (.db.parted.get "/tmp/rfl_parted_drop" 'quotes)) -- 2
+
+;; Dropping what is absent is an error: a gone day, a gone table, a gone root.
+(.db.parted.drop "/tmp/rfl_parted_drop" '2024.01.15 'trades) !- io
+(.db.parted.drop "/tmp/rfl_parted_drop" '2024.01.16 'trades) !- io
+(.db.parted.drop "/tmp/rfl_parted_drop_nope" '2024.01.15 'trades) !- io
+
+(.sys.exec "rm -rf /tmp/rfl_parted_drop") -- 0

@@ -35,6 +35,7 @@
 #include "mem/heap.h"
 #include "ops/ops.h"
 #include "ops/hash.h"     /* ray_hash_bytes — the partition cache's key index */
+#include "store/fileio.h"
 #include "store/splay.h"
 #include "table/sym.h"
 #include "table/domain.h"
@@ -47,6 +48,7 @@
 #include <inttypes.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 /* Validate YYYY.MM.DD format: exactly 10 chars, dots at pos 4/7, and a real
  * calendar date.  A blanket day 01-31 check let calendar-impossible names like
@@ -165,6 +167,16 @@ static int int_name_cmp(const void* a, const void* b) {
     return strcmp(sa, sb);
 }
 
+/* A partition directory name: digits and dots, not a dotfile.  The format is
+ * intentionally loose (e.g. "2024.01.15"); invalid entries fail during splay
+ * load and are caught there. */
+static bool part_dir_name_valid(const char* name) {
+    if (name[0] == '\0' || name[0] == '.') return false;
+    for (const char* c = name; *c; c++)
+        if (*c != '.' && (*c < '0' || *c > '9')) return false;
+    return true;
+}
+
 /* --------------------------------------------------------------------------
  * collect_part_dirs — scan db_root for partition directories
  *
@@ -197,17 +209,7 @@ static ray_t* collect_part_dirs(const char* db_root, char*** out_dirs,
 
     struct dirent* ent;
     while ((ent = readdir(d)) != NULL) {
-        if (ent->d_name[0] == '.') continue;
-
-        /* Partition directory name format validation is intentionally loose:
-         * accepts any sequence of digits and dots (e.g. "2024.01.15").
-         * Invalid entries fail during splay load and are caught there. */
-        bool valid = (ent->d_name[0] != '\0');
-        for (const char* c = ent->d_name; *c; c++) {
-            if (*c == '.' || (*c >= '0' && *c <= '9')) continue;
-            valid = false; break;
-        }
-        if (!valid) continue;
+        if (!part_dir_name_valid(ent->d_name)) continue;
 
         if (part_count >= part_cap) {
             part_cap = part_cap == 0 ? 16 : part_cap * 2;
@@ -730,6 +732,12 @@ void ray_parted_cache_clear(void) {
     part_cache_drop(part_keep_none, NULL);
 }
 
+/* No path separators or traversal, and not a dotfile. */
+static bool part_table_name_valid(const char* name) {
+    return name[0] != '.' && !strchr(name, '/') && !strchr(name, '\\') &&
+           !strstr(name, "..");
+}
+
 /* --------------------------------------------------------------------------
  * ray_read_parted — zero-copy open of a partitioned table
  *
@@ -747,9 +755,7 @@ ray_t* ray_read_parted(const char* db_root, const char* table_name) {
     if (trace)
         fprintf(stderr, "parted.get: root=%s table=%s\n", db_root, table_name);
 
-    /* Validate table_name: no path separators or traversal */
-    if (strchr(table_name, '/') || strchr(table_name, '\\') ||
-        strstr(table_name, "..") || table_name[0] == '.')
+    if (!part_table_name_valid(table_name))
         return ray_error("io", NULL);
 
     /* Release unused domains before opening a possibly rebuilt root. */
@@ -1383,4 +1389,58 @@ ray_t* ray_parted_fill(const char* db_root) {
         return ray_error(ray_err_code_str(err), "parted %s: fill failed", db_root);
     }
     return result;
+}
+
+/* --------------------------------------------------------------------------
+ * ray_parted_drop — remove one table from one partition of a parted db.
+ *
+ * The table directory is first renamed out of its partition into a dotfile
+ * under the root, which no reader enumerates, so a concurrent mount finds
+ * the table either whole or gone.  A partition left empty is removed with
+ * it; one that still holds another table stays.  Both directory changes are
+ * fsynced before the renamed tree is deleted, so the drop is durable once
+ * this returns.  A tree a crash leaves under the dotfile name stays
+ * invisible to readers until a later drop of the same partition and table
+ * removes it.
+ * -------------------------------------------------------------------------- */
+ray_t* ray_parted_drop(const char* db_root, const char* partition,
+                       const char* table_name) {
+    if (!db_root || !*db_root || !partition || !table_name)
+        return ray_error("io", NULL);
+    if (!part_dir_name_valid(partition))
+        return ray_error("domain", "parted %s: '%s' is not a partition name",
+                         db_root, partition);
+    if (!*table_name || !part_table_name_valid(table_name))
+        return ray_error("domain", "parted %s: '%s' is not a table name",
+                         db_root, table_name);
+
+    char part_dir[1024], table_dir[1024], trash[1024];
+    int pn = snprintf(part_dir, sizeof(part_dir), "%s/%s", db_root, partition);
+    int tn = snprintf(table_dir, sizeof(table_dir), "%s/%s", part_dir, table_name);
+    int xn = snprintf(trash, sizeof(trash), "%s/.drop-%s-%s",
+                      db_root, partition, table_name);
+    bool part_fits  = pn >= 0 && (size_t)pn < sizeof(part_dir);
+    bool table_fits = tn >= 0 && (size_t)tn < sizeof(table_dir);
+    bool trash_fits = xn >= 0 && (size_t)xn < sizeof(trash);
+    if (!part_fits || !table_fits || !trash_fits)
+        return ray_error("range", "parted %s: partition path too long", db_root);
+
+    struct stat st;
+    if (stat(table_dir, &st) != 0 || !S_ISDIR(st.st_mode))
+        return ray_error("io", "parted %s: partition %s has no table %s",
+                         db_root, partition, table_name);
+
+    ray_splay_remove_tree(trash);
+    if (ray_file_rename(table_dir, trash) != RAY_OK)
+        return ray_error("io", "parted %s: cannot remove %s", db_root, table_dir);
+
+    bool partition_gone = rmdir(part_dir) == 0;
+    ray_err_t err = partition_gone ? RAY_OK : ray_file_sync_dir(table_dir);
+    if (err == RAY_OK) err = ray_file_sync_dir(trash);
+    ray_splay_remove_tree(trash);
+    if (err != RAY_OK)
+        return ray_error("io", "parted %s: removed %s but could not sync the directory",
+                         db_root, table_dir);
+
+    return ray_sym(ray_sym_intern(partition, strlen(partition)));
 }

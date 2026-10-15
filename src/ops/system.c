@@ -333,6 +333,42 @@ ray_t* ray_fill_parted_fn(ray_t** args, int64_t n) {
     return ray_parted_fill(root);
 }
 
+/* Copy a sym atom's name into buf.  Returns NULL on success, else the error
+ * that `verb` reports for its `what` argument. */
+static ray_t* sym_to_cname(const char* verb, const char* what, ray_t* s,
+                           char* buf, size_t bufsz) {
+    if (!s || s->type != -RAY_SYM)
+        return ray_error("type", "%s expects a sym %s, got %s", verb, what, ray_type_name(s->type));
+    ray_t* name_atom = ray_sym_str(s->i64);
+    if (!name_atom) return ray_error("name", NULL);
+
+    size_t nlen = ray_str_len(name_atom);
+    if (nlen == 0 || nlen >= bufsz)
+        return ray_error("domain", "%s %s length out of range, got %lld", verb, what, (long long)nlen);
+    memcpy(buf, ray_str_ptr(name_atom), nlen);
+    buf[nlen] = '\0';
+    return NULL;
+}
+
+/* (.db.parted.drop "db_root" 'partition 'table_name) → the partition name.
+ * Removes the table from that partition, and the partition with it when no
+ * other table remains there. */
+ray_t* ray_drop_parted_fn(ray_t** args, int64_t n) {
+    if (n != 3)
+        return ray_error("domain", ".db.parted.drop expects 3 arguments, got %lld", (long long)n);
+
+    char root[1024];
+    if (!str_to_cpath(args[0], root, sizeof(root)))
+        return ray_error("type", ".db.parted.drop expects a string db root path, got %s", ray_type_name(args[0]->type));
+
+    char partition[256], name[256];
+    ray_t* err = sym_to_cname(".db.parted.drop", "partition name", args[1], partition, sizeof(partition));
+    if (!err) err = sym_to_cname(".db.parted.drop", "table name", args[2], name, sizeof(name));
+    if (err) return err;
+
+    return ray_parted_drop(root, partition, name);
+}
+
 /* stat/dirent used by the .fs.* filesystem metadata builtins below. */
 #include <sys/stat.h>
 #include <dirent.h>
