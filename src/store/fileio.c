@@ -241,9 +241,22 @@ ray_err_t ray_file_unlock(ray_fd_t fd) {
     return RAY_OK;
 }
 
+/* On macOS fsync(2) moves the data to the drive but does not ask the drive
+ * to flush its write cache; F_FULLFSYNC does (Apple's fsync(2) and fcntl(2)
+ * pages; fcntl(2) lists HFS, FAT, UDF and APFS as implementing it).  Where
+ * the file system refuses it with ENOTSUP or EINVAL, fsync is the strongest
+ * flush left; any other failure is an I/O error. */
+static int sync_fd(int fd) {
+#if defined(RAY_OS_MACOS)
+    if (fcntl(fd, F_FULLFSYNC) == 0) return 0;
+    if (errno != ENOTSUP && errno != EINVAL) return -1;
+#endif
+    return fsync(fd);
+}
+
 ray_err_t ray_file_sync(ray_fd_t fd) {
     if (fd == RAY_FD_INVALID) return RAY_ERR_IO;
-    if (fsync(fd) != 0) return RAY_ERR_IO;
+    if (sync_fd(fd) != 0) return RAY_ERR_IO;
     return RAY_OK;
 }
 
@@ -266,7 +279,7 @@ ray_err_t ray_file_sync_dir(const char* path) {
     }
     int fd = open(dir, O_RDONLY);
     if (fd < 0) return RAY_ERR_IO;
-    int rc = fsync(fd);
+    int rc = sync_fd(fd);
     close(fd);
     return (rc == 0) ? RAY_OK : RAY_ERR_IO;
 }
