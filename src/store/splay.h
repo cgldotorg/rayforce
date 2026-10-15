@@ -79,7 +79,7 @@ ray_err_t ray_splay_resolve_dir(const char* dir, char* out, size_t out_sz);
 bool ray_splay_has_schema(const char* dir);
 /* Remove a file or directory tree, best-effort: entries that cannot be
  * removed are left in place. */
-void ray_splay_remove_tree(const char* path);
+void splay_remove_tree_best_effort(const char* path);
 
 /* Splayed table I/O.
  *

@@ -1430,14 +1430,14 @@ ray_t* ray_parted_drop(const char* db_root, const char* partition,
         return ray_error("io", "parted %s: partition %s has no table %s",
                          db_root, partition, table_name);
 
-    ray_splay_remove_tree(trash);
+    splay_remove_tree_best_effort(trash);
     if (ray_file_rename(table_dir, trash) != RAY_OK)
         return ray_error("io", "parted %s: cannot remove %s", db_root, table_dir);
 
     bool partition_gone = rmdir(part_dir) == 0;
     ray_err_t err = partition_gone ? RAY_OK : ray_file_sync_dir(table_dir);
     if (err == RAY_OK) err = ray_file_sync_dir(trash);
-    ray_splay_remove_tree(trash);
+    splay_remove_tree_best_effort(trash);
     if (err != RAY_OK)
         return ray_error("io", "parted %s: removed %s but could not sync the directory",
                          db_root, table_dir);
