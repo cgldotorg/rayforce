@@ -174,6 +174,9 @@ static test_result_t test_cgroup_stat_flush(void) {
  * On macOS this is the F_FULLFSYNC path; whether the drive flushed its
  * cache cannot be observed from here. */
 static test_result_t test_file_sync_file_and_dir(void) {
+#if defined(RAY_OS_WINDOWS)
+    SKIP("POSIX open and mkdtemp");
+#else
     char dir[64];
     snprintf(dir, sizeof(dir), "/tmp/rayforce_sync_XXXXXX");
     TEST_ASSERT(mkdtemp(dir) != NULL, "a directory of our own");
@@ -191,6 +194,7 @@ static test_result_t test_file_sync_file_and_dir(void) {
     TEST_ASSERT_EQ_I(file_rc, RAY_OK);
     TEST_ASSERT_EQ_I(dir_rc, RAY_OK);
     PASS();
+#endif
 }
 
 /* ---- Suite definition -------------------------------------------------- */
