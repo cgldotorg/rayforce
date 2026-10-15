@@ -44,3 +44,9 @@ ray_t* hf_scale(ray_t** args, int64_t n) {
     out->len = v->len;
     return out;
 }
+
+/* (hf_fail x): the error `hostfn` on every call, a code nothing in rayforce
+ * raises, so a peer that receives it received this function's error. */
+ray_t* hf_fail(ray_t** args, int64_t n) {
+    return ray_error("hostfn", "hf_fail fails on every call");
+}

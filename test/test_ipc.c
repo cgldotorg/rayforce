@@ -921,8 +921,8 @@ static test_result_t test_ipc_poll_restricted_exit_denied(void) {
 /*
  * The server tests run the shipped binary the way a supervisor does,
  * `./rayforce -f <script> --port 127.0.0.1:P -U <pw>`, with a launch script
- * that binds build/libhostfn.so's hf_scale (test/hostfn/hostfn.c) through
- * .sys.loadfn, and talk to it as a restricted peer.
+ * that binds build/libhostfn.so's hf_scale and hf_fail (test/hostfn/hostfn.c)
+ * through .sys.loadfn, and talk to it as a restricted peer.
  */
 
 #include <fcntl.h>
@@ -976,6 +976,7 @@ static const char* hostfn_server_start(hostfn_server_t* s) {
     FILE* f = fopen(s->script, "w");
     if (!f) return "cannot write the launch script";
     fprintf(f, "(set hf_scale (.sys.loadfn \"%s\" 'hf_scale))\n", lib);
+    fprintf(f, "(set hf_fail (.sys.loadfn \"%s\" 'hf_fail))\n", lib);
     fprintf(f, "(set load_it (fn [] (.sys.loadfn \"%s\" 'hf_scale)))\n", lib);
     fclose(f);
 
@@ -1095,7 +1096,7 @@ static test_result_t test_ipc_hostfn_restricted_peer_receives_host_error(void) {
     const char* why = hostfn_server_start(&s);
     if (why) { hostfn_server_stop(&s); FAIL(why); }
 
-    ray_t* err = hostfn_send(s.h, "(hf_scale 2.0)");
+    ray_t* err = hostfn_send(s.h, "(hf_fail 1)");
     char code[16];
     hostfn_code(err, code, sizeof(code));
 
@@ -1106,7 +1107,7 @@ static test_result_t test_ipc_hostfn_restricted_peer_receives_host_error(void) {
     hostfn_drop(err);
     hostfn_drop(next);
     hostfn_server_stop(&s);
-    TEST_ASSERT_FMT(strcmp(code, "arity") == 0 && next_ok,
+    TEST_ASSERT_FMT(strcmp(code, "hostfn") == 0 && next_ok,
                     "host error code=%s next_answered=%d", code, next_ok);
     PASS();
 }
