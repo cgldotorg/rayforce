@@ -1,0 +1,52 @@
+;; @requires: posix  (fixtures/checks run through a POSIX shell via .sys.exec)
+;; A parted GROUP BY answers one group per key holding a row that passes its
+;; where, and none for a partition none of whose rows pass, the first
+;; partition included.  Grouped by the partition column alone, a partition's
+;; partial over zero rows still holds a row; that row is no group.
+
+(.sys.exec "rm -rf /tmp/rfl_parted_group_zero") -- 0
+(.db.splayed.set "/tmp/rfl_parted_group_zero/2024.01.15/t" (table [k v] (list [1 1] [1 2])))
+(.db.splayed.set "/tmp/rfl_parted_group_zero/2024.01.16/t" (table [k v] (list [2 2 1] [10 20 30])))
+(.db.splayed.set "/tmp/rfl_parted_group_zero/2024.01.17/t" (table [k v] (list [1] [100])))
+(set T (.db.parted.get "/tmp/rfl_parted_group_zero" 't))
+
+;; A where no row passes answers no group, with the asked columns.
+(set r (select {from: T where: (== k 9) by: date n: (count v) s: (sum v) a: (avg v)}))
+(list (key r) (count r)) -- (list [date n s a] 0)
+
+;; A where only the middle partition's rows pass answers that date alone.
+(set r (select {from: T where: (== k 2) by: date n: (count v) s: (sum v) a: (avg v)}))
+(list (at r 'date) (at r 'n) (at r 's) (at r 'a)) -- (list [2024.01.16] [2] [30] [15.0])
+
+;; A where every partition passes answers every date.
+(set r (select {from: T where: (> v 0) by: date n: (count v)}))
+(list (at r 'date) (at r 'n)) -- (list [2024.01.15 2024.01.16 2024.01.17] [2 3 1])
+
+;; Grouped by a stored column, a partition with no survivors gives no group.
+(set r (select {from: T where: (== k 2) by: k n: (count v)}))
+(list (at r 'k) (at r 'n)) -- (list [2] [2])
+(set r (select {from: T where: (== k 9) by: k n: (count v)}))
+(list (key r) (count r)) -- (list [k n] 0)
+
+;; Keyless, the aggregate answers its one row though no partition passes.
+(at (select {n: (count v) s: (sum v) from: T where: (== k 9)}) 'n) -- [0]
+
+;; Past the first batch of partitions: nine without survivors, then one with.
+(.sys.exec "rm -rf /tmp/rfl_parted_group_zero_wide") -- 0
+(.db.splayed.set "/tmp/rfl_parted_group_zero_wide/2024.02.01/t" (table [k v] (list [0] [1])))
+(.db.splayed.set "/tmp/rfl_parted_group_zero_wide/2024.02.02/t" (table [k v] (list [0] [2])))
+(.db.splayed.set "/tmp/rfl_parted_group_zero_wide/2024.02.03/t" (table [k v] (list [0] [3])))
+(.db.splayed.set "/tmp/rfl_parted_group_zero_wide/2024.02.04/t" (table [k v] (list [0] [4])))
+(.db.splayed.set "/tmp/rfl_parted_group_zero_wide/2024.02.05/t" (table [k v] (list [0] [5])))
+(.db.splayed.set "/tmp/rfl_parted_group_zero_wide/2024.02.06/t" (table [k v] (list [0] [6])))
+(.db.splayed.set "/tmp/rfl_parted_group_zero_wide/2024.02.07/t" (table [k v] (list [0] [7])))
+(.db.splayed.set "/tmp/rfl_parted_group_zero_wide/2024.02.08/t" (table [k v] (list [0] [8])))
+(.db.splayed.set "/tmp/rfl_parted_group_zero_wide/2024.02.09/t" (table [k v] (list [0] [9])))
+(.db.splayed.set "/tmp/rfl_parted_group_zero_wide/2024.02.10/t" (table [k v] (list [1 1] [10 20])))
+(set W (.db.parted.get "/tmp/rfl_parted_group_zero_wide" 't))
+(set r (select {from: W where: (== k 1) by: date n: (count v) s: (sum v)}))
+(list (at r 'date) (at r 'n) (at r 's)) -- (list [2024.02.10] [2] [30])
+(set r (select {from: W where: (== k 9) by: date n: (count v)}))
+(list (key r) (count r)) -- (list [date n] 0)
+
+(.sys.exec "rm -rf /tmp/rfl_parted_group_zero /tmp/rfl_parted_group_zero_wide") -- 0
