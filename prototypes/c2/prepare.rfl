@@ -1,0 +1,7 @@
+(set F "/home/gunazzi/lead-linux/rayforce-prototypes/c2/fixture")
+(set recast (fn [x] (table [instrument_id ts_recv ts_event bid_px ask_px bid_sz ask_sz raw_symbol parent] (list (at x 'instrument_id) (as 'TIMESTAMP (- (at x 'ts_recv) 946684800000000000)) (as 'TIMESTAMP (- (at x 'ts_event) 946684800000000000)) (at x 'bid_px) (at x 'ask_px) (at x 'bid_sz) (at x 'ask_sz) (at x 'raw_symbol) (at x 'parent)))))
+(set base (recast (.csv.read [I64 I64 I64 I64 I64 I64 I64 STR SYMBOL] (format "%/base.csv" F))))
+(.db.splayed.set (format "%/base/2026.10.29/quotes_1m" F) base (format "%/base/.sym" F) {compress: false})
+(set tail (recast (.csv.read [I64 I64 I64 I64 I64 I64 I64 STR SYMBOL] (format "%/tail.csv" F))))
+(.db.splayed.set (format "%/tail" F) tail (format "%/base/.sym" F) {compress: false index: false})
+(println "PREPARED" (count base) (count tail))

@@ -134,6 +134,21 @@ finally:
     done.touch()
     if reader.poll() is None: reader.kill(); reader.wait()
 
+# Different tables remove the common table lock, so only the shared-domain
+# lock can prevent the two writers assigning the same symbol positions.
+root,table,sym,gen=seed('shared-domain-writers')
+other=root/'other'
+ok(f'(.db.splayed.set "{other}" {old} "{sym}" {{compress: false}})')
+writers=[script(append(t,sym,add.replace('CCC',f'DISTINCT{i}')),async_=True) for i,t in enumerate((table,other))]
+for w in writers:
+    out,err=w.communicate(timeout=30)
+    assert w.returncode==0 and 'error:' not in out+err,(out,err)
+for i,t in enumerate((table,other)):
+    data=dump(t,sym,f'domain-writer-{i}')
+    wanted=before+[row[:-1]+([f'DISTINCT{i}'] if row[-1]=='CCC' else [row[-1]]) for row in tail[1:]]
+    assert data==wanted
+record('different tables concurrently add distinct symbols to one root domain')
+
 for count,width in [(254,0),(65534,1)]:
     root=OUT/f'width-{count}'; root.mkdir(); table=root/'table'; sym=root/'.sym'
     src=root/'symbols.csv'
