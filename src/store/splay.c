@@ -1762,6 +1762,62 @@ static bool p3_write_all(int fd, const void* buf, size_t n) {
     }
     return true;
 }
+
+/* The old column's cells are already positions in the same locked symfile.
+ * Append only newly translated tail positions when its disk width still
+ * admits the new domain.  The caller has interned/flushed all tail symbols
+ * before entering here, and keeps the domain lock through this write. */
+static ray_err_t splay_sym_clone_append(const char* src, const char* dst,
+                                        ray_t* add, int64_t old_rows,
+                                        ray_sym_domain_t* dom, bool* cloned) {
+    *cloned = false;
+    int in = open(src, O_RDONLY);
+    if (in < 0) return RAY_ERR_IO;
+    ray_t hdr;
+    struct stat st;
+    bool valid = fstat(in, &st) == 0 && read(in, &hdr, 32) == 32 &&
+                 hdr.type == RAY_SYM && hdr.order == 0 && hdr.len == old_rows;
+    close(in);
+    if (!valid) return RAY_ERR_DOMAIN;
+    int64_t count = ray_sym_domain_count(dom);
+    uint8_t width = hdr.attrs & RAY_SYM_W_MASK;
+    uint8_t need = ray_sym_dict_width(count);
+    size_t elem = RAY_SYM_ELEM(width);
+    if (width < need) return RAY_OK; /* widening: rebuild via stream writer */
+    if (old_rows > (INT64_MAX - 32) / (int64_t)elem ||
+        st.st_size < 32 + old_rows * (int64_t)elem) return RAY_ERR_DOMAIN;
+    int fd = p3_clone_file(src, dst);
+    if (fd < 0) return RAY_ERR_IO;
+    *cloned = true;
+    ray_err_t err = RAY_OK;
+    off_t end = (off_t)(32 + old_rows * (int64_t)elem);
+    if (ftruncate(fd, end) || lseek(fd, end, SEEK_SET) < 0) err = RAY_ERR_IO;
+    uint64_t buf[8192]; /* aligned for every on-disk width */
+    for (int64_t off = 0; err == RAY_OK && off < add->len;) {
+        int64_t n = add->len - off;
+        if (n > 8192) n = 8192;
+        for (int64_t i = 0; i < n; i++) {
+            ray_t* atom = ray_sym_vec_cell(add, off + i);
+            if (!atom || RAY_IS_ERR(atom)) { err = RAY_ERR_CORRUPT; break; }
+            int64_t pos = ray_sym_domain_find(dom, ray_str_ptr(atom), ray_str_len(atom));
+            if (pos < 0 || pos >= count) { err = RAY_ERR_CORRUPT; break; }
+            ray_write_sym(buf, i, (uint64_t)pos, RAY_SYM, width);
+            if (!pos) hdr.attrs |= RAY_ATTR_HAS_NULLS;
+        }
+        if (err == RAY_OK && !p3_write_all(fd, buf, (size_t)n * elem)) err = RAY_ERR_IO;
+        off += n;
+    }
+    if (err == RAY_OK) {
+        hdr.attrs &= (uint8_t)~RAY_ATTR_SORTED;
+        memset(hdr.aux, 0, 4); /* old accelerator index is no longer valid */
+        hdr.len += add->len;
+        hdr.rc = (uint32_t)count;
+        if (lseek(fd, 0, SEEK_SET) < 0 || !p3_write_all(fd, &hdr, 32) || fsync(fd))
+            err = RAY_ERR_IO;
+    }
+    if (close(fd) != 0 && err == RAY_OK) err = RAY_ERR_IO;
+    return err;
+}
 #endif
 
 static ray_t* splay_reflink_append(ray_t** args, int64_t n, bool product) {
@@ -1790,6 +1846,7 @@ static ray_t* splay_reflink_append(ray_t** args, int64_t n, bool product) {
     if (!w.staged || w.cur_err != RAY_OK) err = RAY_ERR_DOMAIN;
     ray_fd_t sym_lock = RAY_FD_INVALID;
     ray_sym_domain_t* dom = NULL;
+    int64_t original_sym_count = 0;
     if (err == RAY_OK && product) {
         char lockpath[1100];
         int z = snprintf(lockpath, sizeof lockpath, "%s.lk", sym_path);
@@ -1802,6 +1859,7 @@ static ray_t* splay_reflink_append(ray_t** args, int64_t n, bool product) {
         if (err == RAY_OK) {
             dom = ray_sym_domain_open(sym_path);
             if (!dom) err = RAY_ERR_IO;
+            else original_sym_count = ray_sym_domain_count(dom);
         }
     }
     ray_t* old = err == RAY_OK ? ray_read_splayed(root, sym_path) : NULL;
@@ -1921,6 +1979,18 @@ static ray_t* splay_reflink_append(ray_t** args, int64_t n, bool product) {
         char checkpoint[64];
         snprintf(checkpoint, sizeof checkpoint, "clone-%" PRId64, c);
         if (product && (err = append_checkpoint(checkpoint)) != RAY_OK) break;
+        if (product && prior->type == RAY_SYM &&
+            ray_sym_dict_width(original_sym_count) ==
+            ray_sym_dict_width(ray_sym_domain_count(dom))) {
+            bool cloned = false;
+            err = splay_sym_clone_append(src, dst, add, old_rows, dom, &cloned);
+            if (err != RAY_OK) break;
+            if (cloned) {
+                snprintf(checkpoint, sizeof checkpoint, "column-%" PRId64, c);
+                err = append_checkpoint(checkpoint);
+                continue;
+            }
+        }
         if (product && (prior->type == RAY_SYM || prior->type == RAY_STR)) {
             /* These variable-width layouts are reconstructed in a fresh
              * generation; all numeric/temporal columns use FICLONE. */

@@ -1,0 +1,26 @@
+;; @requires: linux
+(.sys.exec "rm -rf /tmp/rfl_s0_sym_reflink; mkdir -p /tmp/rfl_s0_sym_reflink") -- 0
+(set D "/tmp/rfl_s0_sym_reflink/table")
+(set S "/tmp/rfl_s0_sym_reflink/.sym")
+(set T "/tmp/rfl_s0_sym_reflink/tail")
+(set TS "/tmp/rfl_s0_sym_reflink/.tail-sym")
+(set initial (table [a b] (list (.idx.hash (as 'SYMBOL ["red" "blue" ""])) (as 'SYMBOL ["bee" "red" ""]))))
+(.db.splayed.set D initial S {compress: false})
+(.db.splayed.set D initial S {compress: false})
+(set held (.db.splayed.get D S))
+(.idx.has? (at held 'a)) -- true
+(.db.splayed.set T (table [a b] (list (as 'SYMBOL ["bee" "fresh" ""]) (as 'SYMBOL ["fresh" "blue" ""]))) TS {compress: false})
+(set tail (.db.splayed.get T TS))
+(.db.splayed.append D tail S) -- 6
+(as 'STR (at held 'a)) -- (as 'STR ["red" "blue" ""])
+(as 'STR (at held 'b)) -- (as 'STR ["bee" "red" ""])
+(set now (.db.splayed.get D S))
+(as 'STR (at now 'a)) -- (as 'STR ["red" "blue" "" "bee" "fresh" ""])
+(as 'STR (at now 'b)) -- (as 'STR ["bee" "red" "" "fresh" "blue" ""])
+(.idx.has? (at now 'a)) -- false
+(.idx.has? (at now 'b)) -- false
+;; The original width is W8. Stream reconstruction writes W32, so retaining
+;; W8 in the new persisted file exercises the narrow clone-and-append path.
+(.sys.exec "P=$(cat /tmp/rfl_s0_sym_reflink/table/.current); V=$(od -An -t u1 -j 19 -N 1 /tmp/rfl_s0_sym_reflink/table/$P/a); test $((V & 3)) -eq 0") -- 0
+(.sys.exec "P=$(cat /tmp/rfl_s0_sym_reflink/table/.current); V=$(od -An -t u1 -j 19 -N 1 /tmp/rfl_s0_sym_reflink/table/$P/b); test $((V & 3)) -eq 0") -- 0
+(.sys.exec "rm -rf /tmp/rfl_s0_sym_reflink") -- 0
