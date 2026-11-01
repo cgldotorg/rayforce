@@ -12,10 +12,45 @@ readable, then retries the write and verifies the replacement values. Existing
 cancel tests also check the original symbols, not just the row count. This
 does not simulate a machine reboot or power loss.
 
-The full optimized native sanitizer check selected 6,587 cases and passed
-6,572 with 15 environment-dependent skips; see
-`build/check/20261101T142125-2467969/summary.json`. Native measurement and an
-independent Python CSV-to-stored-table comparison are pending coordination.
+The final optimized native sanitizer check on `c9df046d` selected 6,587
+cases and passed 6,572 with 15 environment-dependent skips; see
+`build/check/20261101T142804-2563046/summary.json`. The native release was
+built on that commit (SHA-256
+`634ef5988b49fa13698f94c9667c1afcb7bf026aa5811afe877420f0f6a61c1b`).
+The updated native release on `c9df046d` was measured with 16 explicitly
+requested Rayforce workers under the Northline exclusive reservation. Three
+alternating warm-cache runs on the same 8,344,972-row CSV gave a durable
+streaming median of **0.874 s / 796,688 KiB peak RSS**, and a
+materialize-then-durable-save median of **1.483 s / 1,656,828 KiB peak RSS**.
+Each timed child reopens the parted table and verifies row count, instrument
+sum and distinct parent count. System load1 during the run was 16–17, so this
+is a mixed-load local comparison rather than a quiet-box result. The paths,
+SHA-256, CPU affinity, explicit worker count, per-run load, and individual
+results are in `/home/gunazzi/lead-linux/rayforce-prototypes/p1-native-16/`.
+The 16-worker run uses a 16-CPU affinity reservation and must not be pooled
+directly with the following whole-machine runs, which had a 64-CPU mask.
+
+Under one whole-machine quiet-box reservation, using the same input and
+binary, each worker configuration ran three alternating warm-cache trials:
+
+| Workers | Stream median / peak RSS | Materialize median / peak RSS |
+|---|---|---|
+| 32 | 0.925 s / 796,840 KiB | 1.392 s / 1,657,464 KiB |
+| 64 | 1.111 s / 799,224 KiB | 2.134 s / 1,514,680 KiB |
+
+The 32-worker trials preceded the 64-worker trials rather than alternating
+worker configurations; both paths alternate within each configuration. The
+host's desktop and other non-cooperating activity remained present, load1 was
+roughly 7.0–7.4, and the filesystem cache was warm. These measurements do not
+establish the best worker count in other workloads. Metadata and all samples
+are under `/home/gunazzi/lead-linux/rayforce-prototypes/p1-native-32/` and
+`/home/gunazzi/lead-linux/rayforce-prototypes/p1-native-64/`.
+
+`verify-source.py` independently exported the reopened streaming partition and
+used Python's CSV parser to compare it against the original CSV, field by
+field and row by row. All eight fields and nulls matched across all 8,344,972
+rows (`p1-native-32/source-verification.log`). This was an untimed validation,
+not part of any benchmark.
 
 This is an isolated experiment based on `8dd08ef8`, not a product binary. The
 prototype adds `.csv.splayed` options `sym_path` and `durable`; the existing
