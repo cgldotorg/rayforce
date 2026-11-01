@@ -37,6 +37,7 @@
 #include "table/table.h"
 #include "table/domain.h"
 #include "ops/idxop.h"
+#include "ops/linkop.h"
 #include "core/profile.h"
 #include "vec/str.h"
 #include "lang/format.h"
@@ -50,6 +51,11 @@
 #include <unistd.h>
 #include <time.h>
 #include <stdatomic.h>
+#ifdef RAY_OS_LINUX
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <linux/fs.h>
+#endif
 
 /* --------------------------------------------------------------------------
  * Splayed table: directory of column files + .d schema file
@@ -1707,4 +1713,123 @@ ray_t* ray_read_splayed_dom(const char* dir, struct ray_sym_domain_s* dom) {
         if (!why) return tbl;
         ray_error_free(tbl);
     }
+}
+
+/* Experiment only: generation-0 tables containing I64 columns only.
+ * Existing accelerator indexes are discarded; this is not a general append. */
+#ifdef RAY_OS_LINUX
+static int p3_clone_file(const char* src, const char* dst) {
+    int in = open(src, O_RDONLY);
+    if (in < 0) return -1;
+    int out = open(dst, O_RDWR | O_CREAT | O_EXCL, 0600);
+    if (out < 0) { close(in); return -1; }
+    int rc = ioctl(out, FICLONE, in);
+    close(in);
+    if (rc != 0) { close(out); return -1; }
+    return out;
+}
+
+static bool p3_write_all(int fd, const void* buf, size_t n) {
+    const char* p = buf;
+    while (n) {
+        ssize_t written = write(fd, p, n);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) return false;
+        p += written; n -= (size_t)written;
+    }
+    return true;
+}
+#endif
+
+ray_t* ray_proto_reflink_append_fn(ray_t** args, int64_t n) {
+#ifndef RAY_OS_LINUX
+    (void)args; (void)n;
+    return ray_error("nyi", "append prototype requires Linux FICLONE");
+#else
+    if (n != 2) return ray_error("arity", "append prototype needs a path and I64 table");
+    if (!args[0] || args[0]->type != -RAY_STR || !args[1] || args[1]->type != RAY_TABLE)
+        return ray_error("type", "append prototype needs a path and I64 table");
+    const char* root = ray_str_ptr(args[0]);
+    ray_t* tail = args[1];
+    ray_t* shape_error = ray_table_validate_rectangular(tail, "append prototype");
+    if (shape_error) return shape_error;
+    int64_t tail_rows = ray_table_nrows(tail);
+    int64_t ncols = ray_table_ncols(tail);
+    if (!root || tail_rows <= 0 || ncols <= 0)
+        return ray_error("domain", "append prototype requires rows and columns");
+    ray_splay_write_t w;
+    ray_err_t err = ray_splay_write_begin(root, &w);
+    if (err != RAY_OK) return ray_error(ray_err_code_str(err), NULL);
+    if (!w.staged || w.cur_err != RAY_OK) err = RAY_ERR_DOMAIN;
+    ray_t* old = err == RAY_OK ? ray_read_splayed(root, NULL) : NULL;
+    if (err == RAY_OK && (!old || RAY_IS_ERR(old))) err = RAY_ERR_IO;
+    if (err == RAY_OK && ray_table_ncols(old) != ncols)
+        err = RAY_ERR_TYPE;
+    int64_t old_rows = err == RAY_OK ? ray_table_nrows(old) : 0;
+    if (err == RAY_OK && (old_rows < 0 || tail_rows > (INT64_MAX - 32) / 8 - old_rows))
+        err = RAY_ERR_RANGE;
+    char src[1100], dst[1100];
+    for (int64_t c = 0; err == RAY_OK && c < ncols; c++) {
+        ray_t* prior = ray_table_get_col_idx(old, c);
+        ray_t* add = ray_table_get_col_idx(tail, c);
+        int64_t id = ray_table_col_name(old, c);
+        ray_t* name = ray_sym_str(id);
+        if (!prior || !add || prior->type != RAY_I64 || add->type != RAY_I64 ||
+            ray_table_col_name(tail, c) != id || add->len != tail_rows || !name ||
+            !splay_col_name_safe(ray_str_ptr(name), ray_str_len(name))) {
+            err = RAY_ERR_TYPE; break;
+        }
+        if (ray_link_has(prior) || ray_link_has(add)) {
+            err = RAY_ERR_DOMAIN; break;
+        }
+        int a = snprintf(src, sizeof src, "%s/%s", w.cur, ray_str_ptr(name));
+        int b = snprintf(dst, sizeof dst, "%s/%s", w.dir, ray_str_ptr(name));
+        if (a < 0 || (size_t)a >= sizeof src || b < 0 || (size_t)b >= sizeof dst) {
+            err = RAY_ERR_RANGE; break;
+        }
+        char sidecar[1106];
+        int link_len = snprintf(sidecar, sizeof sidecar, "%s.link", src);
+        struct stat link_stat;
+        if (link_len < 0 || (size_t)link_len >= sizeof sidecar) { err = RAY_ERR_RANGE; break; }
+        if (lstat(sidecar, &link_stat) == 0) { err = RAY_ERR_DOMAIN; break; }
+        if (errno != ENOENT) { err = RAY_ERR_IO; break; }
+        int fd = p3_clone_file(src, dst);
+        if (fd < 0) { err = RAY_ERR_IO; break; }
+        ray_t hdr;
+        struct stat st;
+        if (fstat(fd, &st) || lseek(fd, 0, SEEK_SET) < 0 || read(fd, &hdr, 32) != 32 ||
+            hdr.type != RAY_I64 || hdr.order != 0 || hdr.len != old_rows ||
+            st.st_size < 32 + old_rows * 8) err = RAY_ERR_DOMAIN;
+        if (err == RAY_OK) {
+            const int64_t* data = ray_data(add);
+            for (int64_t i = 0; i < tail_rows; i++)
+                if (data[i] == NULL_I64) hdr.attrs |= RAY_ATTR_HAS_NULLS;
+            hdr.attrs &= (uint8_t)~RAY_ATTR_SORTED;
+            memset(hdr.aux, 0, 4); /* discard the old generation's stale index */
+            hdr.len += tail_rows;
+            if (ftruncate(fd, 32 + old_rows * 8) || lseek(fd, 32 + old_rows * 8, SEEK_SET) < 0 ||
+                !p3_write_all(fd, data, (size_t)tail_rows * 8) || lseek(fd, 0, SEEK_SET) < 0 ||
+                !p3_write_all(fd, &hdr, 32) || fsync(fd)) err = RAY_ERR_IO;
+        }
+        if (close(fd) != 0 && err == RAY_OK) err = RAY_ERR_IO;
+    }
+    if (err == RAY_OK) {
+        int a = snprintf(src, sizeof src, "%s/.d", w.cur);
+        int b = snprintf(dst, sizeof dst, "%s/.d", w.dir);
+        if (a < 0 || (size_t)a >= sizeof src || b < 0 || (size_t)b >= sizeof dst)
+            err = RAY_ERR_RANGE;
+        else {
+            int schema = p3_clone_file(src, dst);
+            if (schema < 0) err = RAY_ERR_IO;
+            else {
+                if (fsync(schema)) err = RAY_ERR_IO;
+                if (close(schema)) err = RAY_ERR_IO;
+            }
+        }
+    }
+    if (old) ray_release(old);
+    err = ray_splay_write_finish(&w, err, true);
+    if (err != RAY_OK) return ray_error(ray_err_code_str(err), "reflink append prototype failed");
+    return ray_i64(old_rows + tail_rows);
+#endif
 }

@@ -4687,6 +4687,7 @@ static void ray_register_builtins(void) {
      * grouped (set/get per format) and there's room to grow
      * without polluting the top-level builtin namespace. */
     register_vary(".db.splayed.set",   RAY_FN_RESTRICTED, ray_set_splayed_fn);
+    register_vary(".db.splayed.append_proto", RAY_FN_RESTRICTED, ray_proto_reflink_append_fn);
     register_vary(".db.splayed.get",   RAY_FN_NONE,       ray_get_splayed_fn);
     register_vary(".db.parted.get",    RAY_FN_NONE,       ray_get_parted_fn);
     register_vary(".db.parted.tables", RAY_FN_NONE,       ray_get_parted_tables_fn);
