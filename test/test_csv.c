@@ -2439,15 +2439,17 @@ static int64_t csv_file_size(const char* path) {
 }
 static test_result_t test_csv_splayed_cancel_symfile(void) {
     ray_heap_init(); (void)ray_sym_init();
-    char dir[128], sym[160];
-    snprintf(dir,sizeof(dir),"/tmp/rayforce-csv-scancel-%d",(int)getpid());
-    snprintf(sym,sizeof(sym),"%s/.sym",dir);
-    csv_test_rm_rf(dir);
+    char root[128], dir[160], sym[160];
+    snprintf(root,sizeof(root),"/tmp/rayforce-csv-scancel-%d",(int)getpid());
+    snprintf(dir,sizeof(dir),"%s/table",root);
+    snprintf(sym,sizeof(sym),"%s/shared.sym",root);
+    csv_test_rm_rf(root);
+    TEST_ASSERT_EQ_I(mkdir(root, 0700), 0);
     int8_t types[] = {RAY_SYM};
     FILE* f = fopen(TMP_CSV, "w"); TEST_ASSERT_NOT_NULL(f);
     fputs("s\nalpha\nbeta\nalpha\n", f); fclose(f);
     for (int run = 0; run < 2; run++)
-        TEST_ASSERT_EQ_I(ray_csv_save_splayed_named_opts(TMP_CSV,',',true,types,1,NULL,0,dir,100000),RAY_OK);
+        TEST_ASSERT_EQ_I(ray_csv_save_splayed_shared(TMP_CSV,',',true,types,1,NULL,0,dir,100000,RAY_COMPRESS_ABSENT,sym,true),RAY_OK);
     int64_t before = csv_file_size(sym);
     TEST_ASSERT_TRUE(before > 0);
     f = fopen(TMP_CSV, "w"); TEST_ASSERT_NOT_NULL(f);
@@ -2455,7 +2457,7 @@ static test_result_t test_csv_splayed_cancel_symfile(void) {
     for (int i = 0; i < 5000; i++) fprintf(f, "word%05d\n", i);
     fclose(f);
     setenv("RAY_CSV_SPLAYED_INJECT", "append", 1);
-    ray_err_t e = ray_csv_save_splayed_named_opts(TMP_CSV,',',true,types,1,NULL,0,dir,100000);
+    ray_err_t e = ray_csv_save_splayed_shared(TMP_CSV,',',true,types,1,NULL,0,dir,100000,RAY_COMPRESS_ABSENT,sym,true);
     unsetenv("RAY_CSV_SPLAYED_INJECT");
     ray_clear_interrupt();
     TEST_ASSERT_EQ_I(e, RAY_ERR_CANCEL);
@@ -2464,7 +2466,16 @@ static test_result_t test_csv_splayed_cancel_symfile(void) {
     TEST_ASSERT_TRUE(t && !RAY_IS_ERR(t));
     TEST_ASSERT_EQ_I(ray_table_nrows(t), 3);
     ray_release(t);
-    csv_test_rm_rf(dir);
+    setenv("RAY_CSV_SPLAYED_INJECT", "close", 1);
+    e = ray_csv_save_splayed_shared(TMP_CSV,',',true,types,1,NULL,0,dir,100000,RAY_COMPRESS_ABSENT,sym,true);
+    unsetenv("RAY_CSV_SPLAYED_INJECT");
+    ray_clear_interrupt();
+    TEST_ASSERT_EQ_I(e, RAY_ERR_CANCEL);
+    t = ray_read_splayed(dir, sym);
+    TEST_ASSERT_TRUE(t && !RAY_IS_ERR(t));
+    TEST_ASSERT_EQ_I(ray_table_nrows(t), 3);
+    ray_release(t);
+    csv_test_rm_rf(root);
     unlink(TMP_CSV); ray_sym_destroy(); ray_heap_destroy();
     PASS();
 }

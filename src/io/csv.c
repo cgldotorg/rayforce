@@ -58,6 +58,7 @@
 #include "vec/vec.h"
 
 #include <inttypes.h>
+#include <errno.h>
 #include <math.h>
 #include <stdarg.h>
 
@@ -3586,7 +3587,7 @@ static ray_err_t csv_save_splayed_to_dir(const char* path, char delimiter, bool 
                                           const int64_t* col_names_in, int32_t n_names,
                                           const char* dir, int64_t rows_per_chunk,
                                           const char* sym_path, ray_compress_t mode,
-                                          const char* cur, ray_err_t cur_err) {
+                                          const char* cur, ray_err_t cur_err, bool durable) {
     if (ray_interrupted()) return RAY_ERR_CANCEL;
     if (!path || !dir || !sym_path) return RAY_ERR_DOMAIN;
     if (rows_per_chunk <= 0) rows_per_chunk = CSV_PART_ROWS_DEFAULT;
@@ -3904,7 +3905,16 @@ static ray_err_t csv_save_splayed_to_dir(const char* path, char delimiter, bool 
         }
     }
     if (err == RAY_OK && sym_dom) {
-        err = ray_sym_domain_flush(sym_dom, false);
+        err = ray_sym_domain_flush(sym_dom, durable);
+        if (err == RAY_OK && durable) {
+            ray_fd_t fd = ray_file_open(sym_path, RAY_OPEN_READ | RAY_OPEN_WRITE);
+            if (fd == RAY_FD_INVALID) err = RAY_ERR_IO;
+            else {
+                err = ray_file_sync(fd);
+                ray_file_close(fd);
+                if (err == RAY_OK) err = ray_file_sync_dir(sym_path);
+            }
+        }
     }
     int64_t tr_flush_end = ray_profile_now_ns();
     if (trace) fprintf(stderr, "csv.splayed: symfile_flush=%.1fms\n", TR_MS(tr_flush_end - tr_loop_end));
@@ -3914,7 +3924,7 @@ static ray_err_t csv_save_splayed_to_dir(const char* path, char delimiter, bool 
      * serially in column order; a failed finish publishes nothing. */
     memset(tr_col_ns, 0, sizeof(tr_col_ns));
     if (err == RAY_OK && csv_splayed_inject("close")) ray_request_interrupt();
-    if (err == RAY_OK) err = ray_col_stream_close_all(writers, ncols, false, trace ? tr_col_ns : NULL);
+    if (err == RAY_OK) err = ray_col_stream_close_all(writers, ncols, durable, trace ? tr_col_ns : NULL);
     else for (int c = 0; c < ncols; c++) ray_col_stream_abort(&writers[c]);
     int64_t tr_close_end = ray_profile_now_ns();
     if (trace) {
@@ -3960,7 +3970,7 @@ static ray_err_t csv_save_splayed_to_dir(const char* path, char delimiter, bool 
             }
         }
         if (schema) {
-            err = ray_col_save_bulk(schema, schema_path);
+            err = durable ? ray_col_save(schema, schema_path) : ray_col_save_bulk(schema, schema_path);
             ray_release(schema);
         }
     }
@@ -3982,22 +3992,96 @@ ray_err_t ray_csv_save_splayed_named_opts(const char* path, char delimiter, bool
                                      RAY_COMPRESS_ABSENT);
 }
 
+static ray_err_t csv_sync_parent_chain(const char* root) {
+    char path[1024];
+    size_t len = strlen(root);
+    if (len == 0 || len >= sizeof(path)) return RAY_ERR_RANGE;
+    memcpy(path, root, len + 1);
+    while (len > 1 && path[len - 1] == '/') path[--len] = '\0';
+    for (;;) {
+        ray_err_t err = ray_file_sync_dir(path);
+        if (err != RAY_OK) return err;
+        char* slash = strrchr(path, '/');
+        if (!slash || slash == path) break;
+        *slash = '\0';
+    }
+    return RAY_OK;
+}
+
+/* Explicit shared domains must be outside the destination table. Resolve
+ * existing directories to prevent dot and parent-symlink aliases; reject
+ * symlink/hardlink symfiles because their identity can change under rename. */
+static ray_err_t csv_validate_shared_sym(const char* root, const char* source,
+                                         const char* sym_path) {
+#ifdef RAY_OS_WINDOWS
+    (void)root; (void)source; (void)sym_path;
+    return RAY_ERR_DOMAIN;
+#else
+    char parent[1024];
+    size_t len = strlen(sym_path);
+    if (!len || len >= sizeof(parent) || sym_path[len - 1] == '/') return RAY_ERR_DOMAIN;
+    memcpy(parent, sym_path, len + 1);
+    char* slash = strrchr(parent, '/');
+    const char* name = slash ? slash + 1 : parent;
+    if (!strcmp(name, ".") || !strcmp(name, "..")) return RAY_ERR_DOMAIN;
+    if (!slash) { parent[0] = '.'; parent[1] = '\0'; }
+    else if (slash == parent) parent[1] = '\0';
+    else *slash = '\0';
+    char* canonical_root = realpath(root, NULL);
+    char* canonical_parent = realpath(parent, NULL);
+    if (!canonical_root || !canonical_parent) {
+        free(canonical_root); free(canonical_parent);
+        return RAY_ERR_IO;
+    }
+    size_t root_len = strlen(canonical_root);
+    bool inside = !strcmp(canonical_root, canonical_parent) ||
+        (root_len == 1 && canonical_root[0] == '/') ||
+        (!strncmp(canonical_root, canonical_parent, root_len) && canonical_parent[root_len] == '/');
+    free(canonical_root); free(canonical_parent);
+    if (inside) return RAY_ERR_RESERVED;
+    struct stat sym, input;
+    if (lstat(sym_path, &sym) != 0) return errno == ENOENT ? RAY_OK : RAY_ERR_IO;
+    if (!S_ISREG(sym.st_mode) || sym.st_nlink != 1) return RAY_ERR_RESERVED;
+    if (stat(source, &input) == 0 && sym.st_dev == input.st_dev && sym.st_ino == input.st_ino)
+        return RAY_ERR_RESERVED;
+    return RAY_OK;
+#endif
+}
+
 ray_err_t ray_csv_save_splayed_mode(const char* path, char delimiter, bool header,
                                     const int8_t* col_types_in, int32_t n_types,
                                     const int64_t* col_names_in, int32_t n_names,
                                     const char* dir, int64_t rows_per_chunk, ray_compress_t mode) {
+    return ray_csv_save_splayed_shared(path, delimiter, header, col_types_in, n_types,
+                                       col_names_in, n_names, dir, rows_per_chunk, mode, NULL, false);
+}
+
+ray_err_t ray_csv_save_splayed_shared(const char* path, char delimiter, bool header,
+                                      const int8_t* col_types_in, int32_t n_types,
+                                      const int64_t* col_names_in, int32_t n_names,
+                                      const char* dir, int64_t rows_per_chunk, ray_compress_t mode,
+                                      const char* shared_sym_path, bool durable) {
     if (ray_interrupted()) return RAY_ERR_CANCEL;
     if (!path || !dir) return RAY_ERR_DOMAIN;
     char sym_path[1024];
-    int n = snprintf(sym_path, sizeof(sym_path), "%s/.sym", dir);
+    int n = shared_sym_path ? snprintf(sym_path, sizeof(sym_path), "%s", shared_sym_path)
+                            : snprintf(sym_path, sizeof(sym_path), "%s/.sym", dir);
     if (n < 0 || (size_t)n >= sizeof(sym_path)) return RAY_ERR_RANGE;
     ray_splay_write_t write;
     ray_err_t err = ray_splay_write_begin_mode(dir, mode, &write);
     if (err != RAY_OK) return err;
+    if (shared_sym_path) {
+        err = csv_validate_shared_sym(write.root, path, sym_path);
+        if (err != RAY_OK) return ray_splay_write_finish(&write, err, false);
+    }
+    if (durable) {
+        err = csv_sync_parent_chain(write.root);
+        if (err != RAY_OK) return ray_splay_write_finish(&write, err, false);
+    }
     err = csv_save_splayed_to_dir(path, delimiter, header, col_types_in, n_types,
                                   col_names_in, n_names, write.dir,
-                                  rows_per_chunk, sym_path, mode, write.cur, write.cur_err);
-    return ray_splay_write_finish(&write, err, false);
+                                  rows_per_chunk, sym_path, mode, write.cur, write.cur_err, durable);
+    return ray_splay_write_finish(&write, err, durable);
 }
 
 static ray_err_t csv_save_parted_impl(const char* path, char delimiter, bool header,
