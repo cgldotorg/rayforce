@@ -1,0 +1,28 @@
+;; @requires: posix
+(.sys.exec "rm -rf rf_csv_shared; mkdir -p rf_csv_shared/db/2026.10.29 rf_csv_shared/db/2026.10.30; printf 'id,parent\\n1,ES\\n2,NQ\\n' > rf_csv_shared/a.csv; printf 'id,parent\\n3,NQ\\n4,CL\\n' > rf_csv_shared/b.csv") -- 0
+(count (.csv.splayed {sym_path: "rf_csv_shared/db/.sym" durable: true} [I64 SYMBOL] "rf_csv_shared/a.csv" "rf_csv_shared/db/2026.10.29/quotes")) -- 2
+(count (.csv.splayed {sym_path: "rf_csv_shared/db/.sym" durable: true} [I64 SYMBOL] "rf_csv_shared/b.csv" "rf_csv_shared/db/2026.10.30/quotes")) -- 2
+(set q (.db.parted.get "rf_csv_shared/db" 'quotes))
+(count q) -- 4
+(at q 'id) -- [1 2 3 4]
+(at q 'parent) -- [ES NQ NQ CL]
+(.sys.exec "cp rf_csv_shared/a.csv rf_csv_shared/a-backup.csv; ln -s db/2026.10.29/quotes rf_csv_shared/table-alias; ln -s a.csv rf_csv_shared/input-alias; ln rf_csv_shared/a.csv rf_csv_shared/input-hardlink; ln rf_csv_shared/db/2026.10.29/quotes/id rf_csv_shared/column-hardlink; ln rf_csv_shared/db/2026.10.29/quotes/.d rf_csv_shared/schema-hardlink") -- 0
+(.csv.splayed {sym_path: "rf_csv_shared/db/2026.10.29/quotes/id" durable: true} [I64 SYMBOL] "rf_csv_shared/a.csv" "rf_csv_shared/db/2026.10.29/quotes") !- reserve
+(.csv.splayed {sym_path: "rf_csv_shared/db/2026.10.29/quotes/.d" durable: true} [I64 SYMBOL] "rf_csv_shared/a.csv" "rf_csv_shared/db/2026.10.29/quotes") !- reserve
+(.csv.splayed {sym_path: "rf_csv_shared/table-alias/id" durable: true} [I64 SYMBOL] "rf_csv_shared/a.csv" "rf_csv_shared/db/2026.10.29/quotes") !- reserve
+(.csv.splayed {sym_path: "rf_csv_shared/column-hardlink" durable: true} [I64 SYMBOL] "rf_csv_shared/a.csv" "rf_csv_shared/db/2026.10.29/quotes") !- reserve
+(.csv.splayed {sym_path: "rf_csv_shared/schema-hardlink" durable: true} [I64 SYMBOL] "rf_csv_shared/a.csv" "rf_csv_shared/db/2026.10.29/quotes") !- reserve
+(.csv.splayed {sym_path: "rf_csv_shared/a.csv" durable: true} [I64 SYMBOL] "rf_csv_shared/a.csv" "rf_csv_shared/db/2026.10.29/quotes") !- reserve
+(.csv.splayed {sym_path: "rf_csv_shared/input-alias" durable: true} [I64 SYMBOL] "rf_csv_shared/a.csv" "rf_csv_shared/db/2026.10.29/quotes") !- reserve
+(.csv.splayed {sym_path: "rf_csv_shared/input-hardlink" durable: true} [I64 SYMBOL] "rf_csv_shared/a.csv" "rf_csv_shared/db/2026.10.29/quotes") !- reserve
+(.sys.exec "cmp rf_csv_shared/a.csv rf_csv_shared/a-backup.csv") -- 0
+(at (.db.parted.get "rf_csv_shared/db" 'quotes) 'id) -- [1 2 3 4]
+(at (.db.parted.get "rf_csv_shared/db" 'quotes) 'parent) -- [ES NQ NQ CL]
+(count (.csv.splayed {sym_path: "rf_csv_shared/db/.sym" durable: true compress: false} [I64 SYMBOL] "rf_csv_shared/b.csv" "rf_csv_shared/db/2026.10.29/quotes")) -- 2
+(at (.db.parted.get "rf_csv_shared/db" 'quotes) 'id) -- [3 4 3 4]
+(.csv.splayed {durable: 1} "rf_csv_shared/a.csv" "rf_csv_shared/bad") !- domain
+(.csv.splayed {sym_path: 2} "rf_csv_shared/a.csv" "rf_csv_shared/bad") !- domain
+(.csv.splayed {sym_path: ""} "rf_csv_shared/a.csv" "rf_csv_shared/bad") !- domain
+(.csv.splayed {extra: true} "rf_csv_shared/a.csv" "rf_csv_shared/bad") !- domain
+(.csv.splayed {sym_path: "rf_csv_shared/missing/.sym" durable: true} [I64 SYMBOL] "rf_csv_shared/a.csv" "rf_csv_shared/no-sym") !- io
+(.sys.exec "rm -rf rf_csv_shared") -- 0

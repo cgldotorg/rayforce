@@ -100,6 +100,11 @@ ray_err_t ray_csv_save_splayed_mode(const char* path, char delimiter, bool heade
                                     const int8_t* col_types, int32_t n_types,
                                     const int64_t* col_names, int32_t n_names,
                                     const char* dir, int64_t rows_per_chunk, ray_compress_t mode);
+ray_err_t ray_csv_save_splayed_shared(const char* path, char delimiter, bool header,
+                                      const int8_t* col_types, int32_t n_types,
+                                      const int64_t* col_names, int32_t n_names,
+                                      const char* dir, int64_t rows_per_chunk, ray_compress_t mode,
+                                      const char* sym_path, bool durable);
 ray_err_t ray_write_csv(ray_t* table, const char* path);
 
 #endif /* RAY_CSV_H */

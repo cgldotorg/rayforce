@@ -81,6 +81,7 @@ static inline int8_t  vrows_to(uint8_t r)  { return r == 2 ? -1 : (int8_t)r; }
 
 #include <math.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <time.h>
 
 /* Maximum recursion depth for ray_eval() to prevent stack overflow.
@@ -111,8 +112,10 @@ static void affine_sum_cache_clear(void) {
  * VM — __VM->nfo / __VM->trace — so they survive across bytecode
  * invocations and stay one-per-thread, per the runtime/VM state model. */
 
-/* Interrupt flag — set by REPL signal handler, checked by eval/VM loops */
-static volatile sig_atomic_t g_eval_interrupted = 0;
+/* The signal handler and worker threads both access this flag. Signal-safe
+ * volatile sig_atomic_t alone does not synchronize concurrent threads. */
+_Static_assert(ATOMIC_INT_LOCK_FREE == 2, "interrupt flag must be signal-safe");
+static _Atomic int g_eval_interrupted = 0;
 
 /* A cancel request must reach BOTH the main-thread eval/VM loops (this flag)
  * and any in-flight parallel workers (the pool's cancel flag, via ray_cancel).
@@ -121,9 +124,9 @@ static volatile sig_atomic_t g_eval_interrupted = 0;
  * ray_cancel/ray_cancel_reset are async-signal-safe, so this stays callable
  * from the signal handler.  Zero hot-path cost: only runs when a cancel is
  * actually requested. */
-void ray_request_interrupt(void)      { g_eval_interrupted = 1; ray_cancel(); }
-void ray_clear_interrupt(void)        { g_eval_interrupted = 0; ray_cancel_reset(); }
-bool ray_interrupted(void)            { return g_eval_interrupted != 0; }
+void ray_request_interrupt(void)      { atomic_store_explicit(&g_eval_interrupted, 1, memory_order_relaxed); ray_cancel(); }
+void ray_clear_interrupt(void)        { atomic_store_explicit(&g_eval_interrupted, 0, memory_order_relaxed); ray_cancel_reset(); }
+bool ray_interrupted(void)            { return atomic_load_explicit(&g_eval_interrupted, memory_order_relaxed) != 0; }
 
 /* Legacy internal names — thin wrappers kept for existing callers. */
 void ray_eval_request_interrupt(void) { ray_request_interrupt(); }
@@ -1576,7 +1579,7 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
         ray_release(e0);
 
         for (int64_t i = 1; i < len; i++) {
-            if ((i & 0xFFFF) == 0 && g_eval_interrupted) { ray_release(vec); return ray_error("cancel", "interrupted"); }
+            if ((i & 0xFFFF) == 0 && ray_interrupted()) { ray_release(vec); return ray_error("cancel", "interrupted"); }
             int la = 0, ra = 0;
             ray_t* a = left_coll  ? collection_elem(left, i, &la)  : left;
             ray_t* b = right_coll ? collection_elem(right, i, &ra) : right;
@@ -1625,7 +1628,7 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
     out[0] = e0;  /* first element already computed */
 
     for (int64_t i = 1; i < len; i++) {
-        if ((i & 0xFFFF) == 0 && g_eval_interrupted) {
+        if ((i & 0xFFFF) == 0 && ray_interrupted()) {
             result->len = i;                 /* the filled prefix only */
             ray_release(result);
             return ray_error("cancel", "interrupted");
@@ -3444,7 +3447,7 @@ op_jmp: {
     int16_t offset = (int16_t)((code[ip] << 8) | code[ip + 1]);
     ip += 2;
     ip += offset;
-    if (offset < 0 && g_eval_interrupted) goto vm_error_cancel;
+    if (offset < 0 && ray_interrupted()) goto vm_error_cancel;
     DISPATCH();
 }
 
@@ -3657,7 +3660,7 @@ op_callf: {
                 ray_release(fn_args[i]);  /* excess args */
 
             /* Check for Ctrl-C interrupt on each compiled call */
-            if (g_eval_interrupted) goto vm_error_cancel;
+            if (ray_interrupted()) goto vm_error_cancel;
 
             /* Switch to callee bytecode */
             code = (uint8_t *)ray_data(LAMBDA_BC(fn_obj));
@@ -5014,7 +5017,7 @@ ray_t* ray_eval(ray_t* obj) {
     }
 
     /* Check for external interrupt (e.g. Ctrl-C from REPL) */
-    if (g_eval_interrupted) return ray_error("cancel", "interrupted");
+    if (ray_interrupted()) return ray_error("cancel", "interrupted");
 
     if (++__VM->eval_depth > RAY_EVAL_MAX_DEPTH) {
         __VM->eval_depth--;

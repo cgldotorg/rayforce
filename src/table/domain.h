@@ -64,9 +64,9 @@
  * the symfile's `.lk` flock and verifies the on-disk prefix still
  * matches what this object knows (anything else is a loud
  * concurrent-writer RAY_ERR_CORRUPT — never a silent remap).
- * Note: the spec's hold-the-`.lk`-for-the-writer's-lifetime contract is
- * deferred with multi-process writer stress (out of scope this phase);
- * the flock is taken per flush.
+ * Generic domain flushes take the flock for the flush. Cooperating shared
+ * CSV imports and product appends hold it from before opening the domain
+ * through the flush so independently assigned positions cannot conflict.
  *
  * Lifecycle: FILE domains are refcounted.  Every attached SYM column
  * holds a ref (taken on attach and in ray_retain_owned_refs, dropped on
@@ -82,6 +82,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#include "store/fileio.h"
 
 typedef struct ray_sym_domain_s ray_sym_domain_t;
 
@@ -329,6 +330,11 @@ const char* ray_sym_domain_path(ray_sym_domain_t* dom);
  * nothing new was interned.  RUNTIME: RAY_OK (the global table owns its
  * own persistence). */
 ray_err_t ray_sym_domain_flush(ray_sym_domain_t* dom, bool durable);
+
+/* Serialize a writer from before it opens the shared domain until after it
+ * has persisted its symbol positions. The caller releases the returned lock. */
+ray_err_t ray_sym_domain_writer_lock(const char* path, ray_fd_t* out);
+void ray_sym_domain_writer_unlock(ray_fd_t fd);
 
 /* Caller must hold an exclusive flock on <domain path>.lk from before the
  * domain was opened through this call; the caller retains the lock. */

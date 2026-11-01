@@ -2678,20 +2678,15 @@ static ray_err_t dom_flush(ray_sym_domain_t* dom, bool durable, bool lock_held) 
     dom_unlock();
     if (!dirty) return RAY_OK; /* nothing new */
 
-    char lock_path[1024];
     char tmp_path[1024];
-    if (snprintf(lock_path, sizeof(lock_path), "%s.lk", dom->path) >= (int)sizeof(lock_path))
-        return RAY_ERR_IO;
     if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", dom->path) >= (int)sizeof(tmp_path))
         return RAY_ERR_IO;
 
     ray_fd_t lock_fd = RAY_FD_INVALID;
     ray_err_t err = RAY_OK;
     if (!lock_held) {
-        lock_fd = ray_file_open(lock_path, RAY_OPEN_READ | RAY_OPEN_WRITE | RAY_OPEN_CREATE);
-        if (lock_fd == RAY_FD_INVALID) return RAY_ERR_IO;
-        err = ray_file_lock_ex(lock_fd);
-        if (err != RAY_OK) { ray_file_close(lock_fd); return err; }
+        err = ray_sym_domain_writer_lock(dom->path, &lock_fd);
+        if (err != RAY_OK) return err;
     }
 
     /* What to write, read under the flock: no other flush of this file runs
@@ -2709,7 +2704,7 @@ static ray_err_t dom_flush(ray_sym_domain_t* dom, bool durable, bool lock_held) 
     dom_dir_t* dir = atomic_load_explicit(&dom->atoms, memory_order_relaxed);
     dom_unlock();
     if (count == disk_count) {
-        if (!lock_held) { ray_file_unlock(lock_fd); ray_file_close(lock_fd); }
+        if (!lock_held) ray_sym_domain_writer_unlock(lock_fd);
         return RAY_OK;
     }
 
@@ -2722,7 +2717,7 @@ static ray_err_t dom_flush(ray_sym_domain_t* dom, bool durable, bool lock_held) 
         bool exists = (stat(dom->path, &st) == 0);
         if (disk_count == 0) {
             if (exists && st.st_size > 0) {
-                if (!lock_held) { ray_file_unlock(lock_fd); ray_file_close(lock_fd); }
+                if (!lock_held) ray_sym_domain_writer_unlock(lock_fd);
                 return RAY_ERR_CORRUPT; /* concurrent writer created it */
             }
             /* a new file: an index left by an earlier one under this name
@@ -2742,7 +2737,7 @@ static ray_err_t dom_flush(ray_sym_domain_t* dom, bool durable, bool lock_held) 
                 if (vf) fclose(vf);
             }
             if (!ok) {
-                if (!lock_held) { ray_file_unlock(lock_fd); ray_file_close(lock_fd); }
+                if (!lock_held) ray_sym_domain_writer_unlock(lock_fd);
                 return RAY_ERR_CORRUPT; /* concurrent writer */
             }
         }
@@ -2754,7 +2749,7 @@ static ray_err_t dom_flush(ray_sym_domain_t* dom, bool durable, bool lock_held) 
     {
         FILE* f = fopen(tmp_path, "wb");
         if (!f) {
-            if (!lock_held) { ray_file_unlock(lock_fd); ray_file_close(lock_fd); }
+            if (!lock_held) ray_sym_domain_writer_unlock(lock_fd);
             return RAY_ERR_IO;
         }
         /* a compressed file keeps its header (the symbol table) and codes
@@ -2834,19 +2829,19 @@ static ray_err_t dom_flush(ray_sym_domain_t* dom, bool durable, bool lock_held) 
     if (durable) {
         err = ray_file_sync_dir(dom->path);
         if (err != RAY_OK) {
-            if (!lock_held) { ray_file_unlock(lock_fd); ray_file_close(lock_fd); }
+            if (!lock_held) ray_sym_domain_writer_unlock(lock_fd);
             return err;
         }
     }
 
     dom_flush_index(dom, count, written_size);
-    if (!lock_held) { ray_file_unlock(lock_fd); ray_file_close(lock_fd); }
+    if (!lock_held) ray_sym_domain_writer_unlock(lock_fd);
     return RAY_OK;
 
 fail_tmp:
     dom_ck_free(&tail);
     remove(tmp_path);
-    if (!lock_held) { ray_file_unlock(lock_fd); ray_file_close(lock_fd); }
+    if (!lock_held) ray_sym_domain_writer_unlock(lock_fd);
     return err;
 }
 
@@ -2860,6 +2855,35 @@ static bool dom_fseek(FILE* f, int64_t off) {
 
 ray_err_t ray_sym_domain_flush(ray_sym_domain_t* dom, bool durable) {
     return dom_flush(dom, durable, false);
+}
+
+ray_err_t ray_sym_domain_writer_lock(const char* path, ray_fd_t* out) {
+    if (!path || !path[0] || !out) return RAY_ERR_RANGE;
+    *out = RAY_FD_INVALID;
+    /* Domain opens resolve symlinks and parent aliases to one cache key.
+     * Lock that same identity, or aliases of a shared symfile can assign
+     * incompatible positions while holding different .lk files. Hard links
+     * have no unique path and are incompatible with atomic replacement. */
+    struct stat st;
+    if (stat(path, &st) == 0 && st.st_nlink > 1) return RAY_ERR_RESERVED;
+    char* canonical = dom_resolve_path(path);
+    if (!canonical) return RAY_ERR_IO;
+    char lock_path[PATH_MAX + 4];
+    int n = snprintf(lock_path, sizeof(lock_path), "%s.lk", canonical);
+    ray_sys_free(canonical);
+    if (n < 0 || (size_t)n >= sizeof(lock_path)) return RAY_ERR_RANGE;
+    ray_fd_t fd = ray_file_open(lock_path, RAY_OPEN_READ | RAY_OPEN_WRITE | RAY_OPEN_CREATE);
+    if (fd == RAY_FD_INVALID) return RAY_ERR_IO;
+    ray_err_t err = ray_file_lock_ex(fd);
+    if (err != RAY_OK) { ray_file_close(fd); return err; }
+    *out = fd;
+    return RAY_OK;
+}
+
+void ray_sym_domain_writer_unlock(ray_fd_t fd) {
+    if (fd == RAY_FD_INVALID) return;
+    (void)ray_file_unlock(fd);
+    ray_file_close(fd);
 }
 
 ray_err_t ray_sym_domain_flush_locked(ray_sym_domain_t* dom, bool durable) {
@@ -2877,14 +2901,9 @@ ray_err_t ray_sym_domain_flush_append(ray_sym_domain_t* dom, bool durable) {
     dom_unlock();
     if (!dirty && !durable) return RAY_OK;
 
-    char lock_path[1024];
-    if (snprintf(lock_path, sizeof(lock_path), "%s.lk", dom->path) >= (int)sizeof(lock_path))
-        return RAY_ERR_IO;
-    ray_fd_t lock_fd = ray_file_open(lock_path,
-                                     RAY_OPEN_READ | RAY_OPEN_WRITE | RAY_OPEN_CREATE);
-    if (lock_fd == RAY_FD_INVALID) return RAY_ERR_IO;
-    ray_err_t err = ray_file_lock_ex(lock_fd);
-    if (err != RAY_OK) { ray_file_close(lock_fd); return err; }
+    ray_fd_t lock_fd = RAY_FD_INVALID;
+    ray_err_t err = ray_sym_domain_writer_lock(dom->path, &lock_fd);
+    if (err != RAY_OK) return err;
 
     /* Only the entries past the persisted prefix are written: appended
      * atoms (never NULL), read under the flock as in ray_sym_domain_flush. */
@@ -2895,8 +2914,7 @@ ray_err_t ray_sym_domain_flush_append(ray_sym_domain_t* dom, bool durable) {
     dom_dir_t* dir = atomic_load_explicit(&dom->atoms, memory_order_relaxed);
     dom_unlock();
     if (count == disk_count && !durable) {
-        ray_file_unlock(lock_fd);
-        ray_file_close(lock_fd);
+        ray_sym_domain_writer_unlock(lock_fd);
         return RAY_OK;
     }
 
@@ -2906,13 +2924,12 @@ ray_err_t ray_sym_domain_flush_append(ray_sym_domain_t* dom, bool durable) {
     bool exists = stat(dom->path, &st) == 0;
     if (disk_count == 0 ? (exists && st.st_size > 0)
                         : (!exists || (size_t)st.st_size != disk_size)) {
-        ray_file_unlock(lock_fd);
-        ray_file_close(lock_fd);
+        ray_sym_domain_writer_unlock(lock_fd);
         return RAY_ERR_CORRUPT;
     }
     if (disk_count == 0) ray_sym_domain_index_remove(dom->path);   /* a new file */
     FILE* f = fopen(dom->path, disk_count == 0 ? "wb+" : "rb+");
-    if (!f) { ray_file_unlock(lock_fd); ray_file_close(lock_fd); return RAY_ERR_IO; }
+    if (!f) { ray_sym_domain_writer_unlock(lock_fd); return RAY_ERR_IO; }
     size_t size = disk_size;
     uint32_t magic = DOMAIN_STRL_MAGIC;
     if (disk_count == 0) {
@@ -2984,8 +3001,7 @@ ray_err_t ray_sym_domain_flush_append(ray_sym_domain_t* dom, bool durable) {
         err = RAY_OK;   /* the symfile is written; the index is a cache */
     }
     dom_ck_free(&tail);
-    ray_file_unlock(lock_fd);
-    ray_file_close(lock_fd);
+    ray_sym_domain_writer_unlock(lock_fd);
     return err;
 }
 

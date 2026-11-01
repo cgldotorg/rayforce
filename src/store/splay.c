@@ -50,9 +50,11 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifndef RAY_OS_WINDOWS
+#include <signal.h>
+#endif
 #include <time.h>
 #include <stdatomic.h>
-#include <signal.h>
 #ifdef RAY_OS_LINUX
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -279,6 +281,16 @@ static ray_err_t append_checkpoint(const char* point) {
     return RAY_OK;
 }
 
+/* Debug-only stop points for the CSV crash-order process test. */
+static void splay_csv_stop_after(const char* step) {
+#if defined(DEBUG) && !defined(RAY_OS_WINDOWS)
+    const char* e = getenv("RAY_CSV_SPLAYED_INJECT");
+    if (e && strcmp(e, step) == 0) raise(SIGSTOP);
+#else
+    (void)step;
+#endif
+}
+
 static ray_err_t splay_publish_generation(const char* dir, const char* gen,
                                           bool durable, ray_splay_write_t* write) {
     char manifest[1024], tmp[1024];
@@ -307,14 +319,17 @@ static ray_err_t splay_publish_generation(const char* dir, const char* gen,
     ray_err_t err = durable ? ray_file_sync(fd) : RAY_OK;
     ray_file_close(fd);
     if (err == RAY_OK && write->append) err = append_checkpoint("manifest");
+    if (err == RAY_OK && durable) splay_csv_stop_after("stop_after_manifest_sync");
     if (err != RAY_OK || ray_file_rename(tmp, manifest) != RAY_OK) {
         (void)remove(tmp);
         return RAY_ERR_IO;
     }
     write->published = true;
     if (write->append && append_checkpoint("publish") != RAY_OK) return RAY_ERR_IO;
+    if (durable) splay_csv_stop_after("stop_after_publish");
     err = durable ? ray_file_sync_dir(manifest) : RAY_OK;
     if (err == RAY_OK && write->append) err = append_checkpoint("directory");
+    if (err == RAY_OK && durable) splay_csv_stop_after("stop_after_publish_dir");
     return err;
 }
 
@@ -1006,6 +1021,7 @@ ray_err_t ray_splay_write_finish(ray_splay_write_t* write, ray_err_t result,
             if (result == RAY_OK) result = ray_file_sync_dir(write->dir);
             if (result == RAY_OK && write->append) result = append_checkpoint("parent");
         }
+        if (result == RAY_OK && durable) splay_csv_stop_after("stop_after_stage_dirs");
         if (result == RAY_OK)
             result = splay_publish_generation(write->root, write->generation, durable, write);
         if (result == RAY_OK && !write->append) {
@@ -1848,14 +1864,7 @@ static ray_t* splay_reflink_append(ray_t** args, int64_t n, bool product) {
     ray_sym_domain_t* dom = NULL;
     int64_t original_sym_count = 0;
     if (err == RAY_OK && product) {
-        char lockpath[1100];
-        int z = snprintf(lockpath, sizeof lockpath, "%s.lk", sym_path);
-        if (!sym_path[0] || z < 0 || (size_t)z >= sizeof lockpath) err = RAY_ERR_RANGE;
-        else {
-            sym_lock = ray_file_open(lockpath, RAY_OPEN_READ | RAY_OPEN_WRITE | RAY_OPEN_CREATE);
-            if (sym_lock == RAY_FD_INVALID) err = RAY_ERR_IO;
-            else if (ray_file_lock_ex(sym_lock) != RAY_OK) { ray_file_close(sym_lock); sym_lock = RAY_FD_INVALID; err = RAY_ERR_IO; }
-        }
+        err = ray_sym_domain_writer_lock(sym_path, &sym_lock);
         if (err == RAY_OK) {
             dom = ray_sym_domain_open(sym_path);
             if (!dom) err = RAY_ERR_IO;
@@ -2045,10 +2054,7 @@ static ray_t* splay_reflink_append(ray_t** args, int64_t n, bool product) {
     }
     if (old) ray_release(old);
     if (dom) ray_sym_domain_release(dom);
-    if (sym_lock != RAY_FD_INVALID) {
-        (void)ray_file_unlock(sym_lock);
-        ray_file_close(sym_lock);
-    }
+    ray_sym_domain_writer_unlock(sym_lock);
     err = ray_splay_write_finish(&w, err, true);
     if (err != RAY_OK && product && w.published)
         return ray_error("commit", "append published; reconcile before retrying");

@@ -654,11 +654,45 @@ static const char* csv_default_sym_path(const char* dir, char* buf, size_t bufsz
 
 ray_t* ray_read_csv_splayed_fn(ray_t** args, int64_t n) {
     ray_compress_t mode = RAY_COMPRESS_ABSENT;
+    bool durable = false;
+    char sym_path[1024];
+    const char* sym = NULL;
     if (n >= 1 && args[0] && args[0]->type == RAY_DICT) {
         if (n >= 2 && args[1] && args[1]->type == RAY_DICT)
             return ray_error("domain", "csv.splayed: a second options dict");
-        ray_t* oerr = ray_compress_opt_parse(args[0], true, &mode);
+        ray_t* keys = ray_dict_keys(args[0]);
+        if (keys && keys->len > 0 && keys->type != RAY_SYM)
+            return ray_error("domain", "option keys must be symbols");
+        for (int64_t i = 0; keys && i < keys->len; i++) {
+            ray_t* k = ray_sym_vec_cell(keys, i);
+            bool known = k && ((ray_str_len(k) == 8 && memcmp(ray_str_ptr(k), "compress", 8) == 0) ||
+                               (ray_str_len(k) == 8 && memcmp(ray_str_ptr(k), "sym_path", 8) == 0) ||
+                               (ray_str_len(k) == 7 && memcmp(ray_str_ptr(k), "durable", 7) == 0));
+            if (!known) return ray_error("domain", "csv.splayed: unknown option");
+        }
+        ray_t* oerr = ray_compress_opt_parse(args[0], false, &mode);
         if (oerr) return oerr;
+        ray_t* key = ray_sym(ray_sym_intern("durable", 7));
+        if (!key || RAY_IS_ERR(key)) return key ? key : ray_error("oom", NULL);
+        ray_t* v = ray_dict_get(args[0], key);
+        ray_release(key);
+        if (v && RAY_IS_ERR(v)) return v;
+        if (v) {
+            bool ok = v->type == -RAY_BOOL;
+            if (ok) durable = v->b8;
+            ray_release(v);
+            if (!ok) return ray_error("domain", "durable must be true or false");
+        }
+        key = ray_sym(ray_sym_intern("sym_path", 8));
+        if (!key || RAY_IS_ERR(key)) return key ? key : ray_error("oom", NULL);
+        v = ray_dict_get(args[0], key);
+        ray_release(key);
+        if (v && RAY_IS_ERR(v)) return v;
+        if (v) {
+            sym = csv_str_arg(v, sym_path, sizeof(sym_path));
+            ray_release(v);
+            if (!sym) return ray_error("domain", "sym_path must be a nonempty path string");
+        }
         args++; n--;
     }
     if (n < 2 || n > 4) return ray_error("arity", "csv.splayed: expects 2 to 4 arguments, got %lld", (long long)n);
@@ -714,14 +748,13 @@ ray_t* ray_read_csv_splayed_fn(ray_t** args, int64_t n) {
         }
     }
 
-    ray_err_t err = ray_csv_save_splayed_mode(path, 0, header,
+    ray_err_t err = ray_csv_save_splayed_shared(path, 0, header,
                                               types_arg, ncols,
                                               names_arg, ncols,
-                                              dir, 0, mode);
+                                              dir, 0, mode, sym, durable);
     if (err != RAY_OK) return ray_error(ray_err_code_str(err), NULL);
 
-    char sym_path[1024];
-    const char* sym = csv_default_sym_path(dir, sym_path, sizeof(sym_path));
+    if (!sym) sym = csv_default_sym_path(dir, sym_path, sizeof(sym_path));
     if (!sym) return ray_error("io", NULL);
 
     /* The writer builds indexes before publishing its generation. */
