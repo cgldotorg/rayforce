@@ -3,11 +3,13 @@
 (set D "/tmp/rfl_reflink_append_first_null")
 (set initial (table [id ts px] (list [1 2] (as 'TIMESTAMP [123 456]) [11 12])))
 (.db.splayed.set D initial {compress: false})
+(.sys.exec "for c in ts px; do b=$(xxd -s 19 -l 1 -p /tmp/rfl_reflink_append_first_null/$c); [ $((0x$b & 64)) -eq 0 ] || exit 1; done") -- 0
 (set old (.db.splayed.get D))
 (count (select {from: old where: (nil? ts)})) -- 0
 (count (select {from: old where: (nil? px)})) -- 0
 (set tail (table [id ts px] (list [3 4] (as 'TIMESTAMP [0N 789]) [13 0N])))
 (.db.splayed.append_proto D tail) -- 4
+(.sys.exec "g=$(cat /tmp/rfl_reflink_append_first_null/.current); for c in ts px; do b=$(xxd -s 19 -l 1 -p /tmp/rfl_reflink_append_first_null/$g/$c); [ $((0x$b & 64)) -ne 0 ] || exit 1; done") -- 0
 (set current (.db.splayed.get D))
 (at (select {from: current where: (nil? ts)}) 'id) -- [3]
 (at (select {from: current where: (nil? px)}) 'id) -- [4]
