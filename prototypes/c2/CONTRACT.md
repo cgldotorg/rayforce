@@ -1,100 +1,103 @@
-# C2 append contract — proposal, 2026-11-01
+# C2: durable append contract
 
-Status: **proposed, not yet implemented or validated**. This document precedes
-the C implementation. Success means the tests and measurements below have run
-against the exact candidate; no guarantee here is claimed for P3 as it stands.
-The request says eight columns but enumerates nine: instrument_id, ts_recv,
-ts_event, bid_px, ask_px, bid_sz, ask_sz, raw_symbol, parent. This contract
-uses those nine, in that order, with I64, TIMESTAMP, TIMESTAMP, I64, I64,
-I64, I64, STR, SYM types. Root `.sym` is shared by all partitions.
+Written 2026-11-01 before C2 implementation. This is the intended contract;
+REPORT.md records what the implementation and evidence actually establish.
+Linux, local reflink-capable filesystem, ordinary file-based shared symbol
+domain. The input schema is nine columns (the brief says eight but enumerates
+nine): instrument_id I64, ts_recv TIMESTAMP, ts_event TIMESTAMP, bid_px I64,
+ask_px I64, bid_sz I64, ask_sz I64, raw_symbol STR, parent SYM. The generic
+builtin accepts matching ordered schemas drawn from these four types.
 
 ## 1. Atomicity and visibility
 
-Append writes a new immutable physical generation while holding the target
-splayed table's writer lock. No reader receives a partial generation. An
-already mapped reader remains on its previous snapshot; R1 establishes this
-also for a parted object held by a running server. A fresh mount resolves
-`.current` and sees the complete generation selected there. The caller must
-remount `.db.parted.get` for its next query or call a nullary mount function;
-invalidating the path-keyed per-thread cache alone does not refresh an
-already-held parted object. Appending does not mutate a caller-held value.
-Cross-process held-reader and remount tests must exercise all nine columns,
-including new symbols, strings and nulls. Two concurrent table writers must
-both succeed or return a documented error without loss or partial publish.
+`.db.splayed.append(path, table, sym_path)` serializes writers with the existing
+partition `.write.lock`. It clones into an unpublished generation and never
+changes published column bytes. A mapped reader keeps its complete old view;
+a fresh open after the atomic `.current` rename obtains the complete new view.
+Rows from two successful appends are both present, in lock acquisition order.
+No partial table is published. Append requires an existing table.
 
-## 2. Durability and publication
+A bound table is a snapshot, not a live subscription. Another process's
+publish does not mutate that value. Reopening `.db.parted.get` re-resolves the
+generation and replaces the path-keyed partition cache entry. C8's engine
+capability performs this remount and replaces the launch-bound `quotes_1m`
+binding before acknowledging success; the next request on that connection
+uses it. Held values remain snapshots. R1 supplies the external-server evidence.
 
-Intended ordering (exact code lines and failure-injection evidence must be
-added when implemented):
+## 2. Durability
 
-1. Create the generation directory under the held table lock; sync any new
-   directory entries needed to reach it.
-2. Resolve and append new root-domain symbols while holding the shared-domain
-   writer lock; durably flush the shared symfile and its parent before any
-   generation referencing the new positions can become current.
-3. Write/reflink the new generation's column files, including the string pool
-   and symbol codes, strip stale indexes, and fsync every completed file.
-4. Write the generation's `.d` schema; fsync it and then sync the generation
-   and its parent directory entries.
-5. Write and fsync the temporary `.current` manifest, rename it atomically
-   onto `.current` (the visibility point), then fsync the table root.
-6. Retire/prune only generations whose removal does not invalidate any
-   promised reopen or already-mapped reader; sync required directory changes.
+The append preserves old generations for recovery (including the legacy root
+files); cleanup is an explicit later operation, outside this prototype. The
+existing generic rewrite path may prune them, so this retention claim applies
+to append-only histories. Numbered durable checkpoints, injected only by the
+external test harness, are:
 
-Before step 5 rename, the old generation remains current and reopenable.
-After the rename, a fresh reader may see the new complete generation. A
-failure after rename but before the root fsync is **ambiguous**: the caller
-must inspect the current generation and must not blindly retry. A successful
-return requires all durability steps. SIGKILL after each exposed step tests
-process interruption, not loss of kernel cache or storage power; no physical
-power-loss guarantee is proven without a fault-capable filesystem test.
-P3 currently prunes older generations after a successful publish, so it does
-not establish a blanket claim that generation g remains reopenable by path
-at every later step. Decide and test retention before making such a claim.
+1. Sync the existing root's directory chain and the generation parent, making
+   the private generation's ancestry durable.
+2. Under `<sym>.lk`, refresh the domain, intern tail symbols, flush the symfile
+   through a synced temporary file, rename it, and sync its parent directory.
+   Existing symbol positions remain permanent. No column is published first.
+3. Sync every completed cloned/rewritten column, in schema order (one test
+   checkpoint for each column).
+4. Sync the cloned `.d` schema.
+5. Sync the new generation directory and `.generations` directory.
+6. Write and sync the temporary manifest containing the new generation name.
+7. Atomically rename the manifest to `.current`, then sync the table directory.
+
+After each completed numbered checkpoint, a crash leaves generation g readable
+and published generation g+1 either absent or whole. Private staging files may
+be partial before step 5 and are never a published generation. Step 7's rename
+is the visibility point; its final sync is the durable acknowledgement point.
+A kill test is evidence about process death, not power loss or a dishonest
+storage device. Old files remain openable for independent field comparison.
 
 ## 3. Symbols and strings
 
-Translate every appended `parent` value into the root sym domain while the
-domain lock excludes competing writers; append positions are permanent and
-flush precedes publication. A failure may leave extra unused symbols but must
-not leave a published column pointing to missing or remapped positions. Cover
-new symbols introduced concurrently by independent processes. Width changes
-at 255 and 65,535 positions must be supported safely (widen old codes when
-needed, or select W32/W64 for the new complete column); no overflow or silent
-truncation. `raw_symbol` retains every string byte and empty/null semantics;
-the output string pool and its 32-bit offsets must be checked for overflow and
-either produced intact or rejected before publication. Verify strings, domain
-values and nulls field by field after reopen, including width crossings.
+The symfile lock spans refresh, interning, and durable flush. Positions are
+never reassigned. A failed append may leave unused new dictionary entries;
+it cannot change the meaning of old values. W8/W16/W32 follows the engine's
+domain-count rule; crossing 255 or 65,535 entries widens the cloned SYM payload
+by rewriting its ids. Otherwise the existing width is kept or widened, never
+truncated. Tail ids are translated from their source domain.
 
-## 4. Saved indexes
+STR uses 16-byte descriptors followed by a pool header and byte pool. Growing
+the descriptors moves the pool inside the private clone; old descriptors keep
+their offsets and new descriptors rebase onto the old pool length. Long-string
+hashes are valid. Pool growth past UINT32_MAX fails with `range` before publish.
+Null/empty and inline/pooled strings retain the engine's existing semantics.
 
-The first candidate discards stale persisted index trailers on the new
-generation and leaves it index-free until an explicit separate rebuild. It
-does not claim automatic close-of-session rebuild. Existing mapped readers
-retain their old index as part of their prior snapshot. Tests inspect persisted
-metadata after reopen and check that an as-of query gives the correct answer.
-Measure as-of query latency for index-free appended and indexed/rebuilt or
-rewritten generations on equivalent data, with their index state stated.
+## 4. Indexes
 
-## 5. Failure behavior
+Append removes every persisted index trailer and sorted flag; the resulting
+generation is index-free. It does not silently claim incremental indexes or
+schedule a close-time rebuild. A caller may perform an indexed durable rewrite
+at session close. Measurements compare append and rewrite with indexes off,
+and the as-of query on appended, unindexed-rewritten, and indexed-rewritten
+data. Saved indexes in the source must not survive as stale trailers.
 
-Validate schema names, order, rectangularity, types, counts and safe paths;
-reject unsupported compressed or linked columns, schema mismatch, string-pool
-overflow and unsupported clone operations with a typed error before manifest
-rename. Failed clone/write/fsync or disk-full before rename must not publish;
-an old fresh mount remains readable. Failure of the final root fsync after
-rename is an indeterminate publication, not a no-publish guarantee. Injection
-must verify both paths and make post-rename ambiguity visible. Nothing here
-extends `-U` IPC access; this builtin remains restricted.
+## 5. Failure
 
-## 6. Cost and validation
+Schema/name/order/type mismatch answers `type`; compressed, linked or unsupported
+storage answers `domain`; bounds overflow answers `range`; clone, write, sync
+and ENOSPC failures before manifest rename answer `io`. None publishes a new
+generation. Validation covers all columns before modifying symbols or payloads.
+Unpublished files are removed on ordinary failure; kill may leave hidden stages.
 
-Measure one approximately 22,000-row real minute on an 11M-row nine-column
-partition, native release, against a like-for-like rewrite with both index
-states reported. Alternate at least three runs inside `serial.sh --class
-exclusive`, record worker count, affinity, load, page-cache condition, binary
-hash, engine wall and peak RSS. Compare all fields after reopen. Measure
-as-of queries beside the append and rewrite. Run optimized `make check`, Linux
-TSan filters, held-reader, dual-writer, schema/type/null, string-pool,
-symbol-width, index, error and SIGKILL-after-each-step tests. Report exactly
-which passed and what remains unmeasured; a test gap is not a contract met.
+The brief's unconditional “disk full never publishes” cannot be guaranteed if
+an error happens after atomic rename. A final directory-sync failure has a
+commit-uncertain outcome: the new complete generation may already be visible.
+The caller must reopen/reconcile, never blindly retry. The report must show this
+case distinctly. A successful append is not an idempotent request.
+
+## 6. Cost and evidence obligations
+
+Use an approximately 11 M-row full session and one actual clock minute, retaining
+all nine columns. Record exact row counts and symbol provenance. Three alternating
+append/rewrite runs under the exclusive serial reservation, warm cache, reserved
+affinity, same worker count and release binary; report engine time, wall, peak
+RSS, load1, SHA-256, and all samples. Verify fields independently, not just sums.
+Include the as-of latency comparison and benchmark checklist evidence. Required
+correctness cases: checkpoints and ordinary I/O failures, width boundaries,
+strings/nulls/index removal, held separate-process reader, competing writers,
+optimized full check and focused Linux TSan. REPORT.md must distinguish evidence
+still pending from passing results and end with what the run could not measure.
