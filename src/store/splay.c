@@ -33,6 +33,7 @@
 #include "store/encfmt.h"
 #include "store/fileio.h"
 #include "store/serde.h"
+#include "store/stream.h"
 #include "table/sym.h"
 #include "table/table.h"
 #include "table/domain.h"
@@ -51,6 +52,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <stdatomic.h>
+#include <signal.h>
 #ifdef RAY_OS_LINUX
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -264,8 +266,21 @@ ray_err_t ray_splay_resolve_dir(const char* dir, char* out, size_t out_sz) {
     return n < 0 || (size_t)n >= out_sz ? RAY_ERR_RANGE : RAY_OK;
 }
 
+/* DEBUG-only process-death/error injection. Never selected by a peer request. */
+static ray_err_t append_checkpoint(const char* point) {
+#if defined(DEBUG) && !defined(RAY_OS_WINDOWS)
+    const char* stop = getenv("RAY_APPEND_STOP");
+    if (stop && strcmp(stop, point) == 0) raise(SIGSTOP);
+    const char* fail = getenv("RAY_APPEND_FAIL");
+    if (fail && strcmp(fail, point) == 0) { errno = ENOSPC; return RAY_ERR_IO; }
+#else
+    (void)point;
+#endif
+    return RAY_OK;
+}
+
 static ray_err_t splay_publish_generation(const char* dir, const char* gen,
-                                          bool durable) {
+                                          bool durable, ray_splay_write_t* write) {
     char manifest[1024], tmp[1024];
     int n = snprintf(manifest, sizeof(manifest), "%s/.current", dir);
     if (n < 0 || (size_t)n >= sizeof(manifest)) return RAY_ERR_RANGE;
@@ -291,11 +306,16 @@ static ray_err_t splay_publish_generation(const char* dir, const char* gen,
     }
     ray_err_t err = durable ? ray_file_sync(fd) : RAY_OK;
     ray_file_close(fd);
+    if (err == RAY_OK && write->append) err = append_checkpoint("manifest");
     if (err != RAY_OK || ray_file_rename(tmp, manifest) != RAY_OK) {
         (void)remove(tmp);
         return RAY_ERR_IO;
     }
-    return durable ? ray_file_sync_dir(manifest) : RAY_OK;
+    write->published = true;
+    if (write->append && append_checkpoint("publish") != RAY_OK) return RAY_ERR_IO;
+    err = durable ? ray_file_sync_dir(manifest) : RAY_OK;
+    if (err == RAY_OK && write->append) err = append_checkpoint("directory");
+    return err;
 }
 
 static ray_err_t splay_has_file(const char* dir, const char* name, bool* exists) {
@@ -980,12 +1000,15 @@ ray_err_t ray_splay_write_finish(ray_splay_write_t* write, ray_err_t result,
         /* ray_file_sync_dir syncs the PARENT of its argument. */
         char schema[1100];
         snprintf(schema, sizeof(schema), "%s/.d", write->dir);
-        if (durable && (ray_file_sync_dir(schema) != RAY_OK ||
-                        ray_file_sync_dir(write->dir) != RAY_OK))
-            result = RAY_ERR_IO;
+        if (durable) {
+            result = ray_file_sync_dir(schema);
+            if (result == RAY_OK && write->append) result = append_checkpoint("generation");
+            if (result == RAY_OK) result = ray_file_sync_dir(write->dir);
+            if (result == RAY_OK && write->append) result = append_checkpoint("parent");
+        }
         if (result == RAY_OK)
-            result = splay_publish_generation(write->root, write->generation, durable);
-        if (result == RAY_OK) {
+            result = splay_publish_generation(write->root, write->generation, durable, write);
+        if (result == RAY_OK && !write->append) {
             splay_retire_legacy_schema(write->root);
             splay_prune_generations(write->root, write->generation);
         }
@@ -1741,15 +1764,18 @@ static bool p3_write_all(int fd, const void* buf, size_t n) {
 }
 #endif
 
-ray_t* ray_proto_reflink_append_fn(ray_t** args, int64_t n) {
+static ray_t* splay_reflink_append(ray_t** args, int64_t n, bool product) {
 #ifndef RAY_OS_LINUX
-    (void)args; (void)n;
+    (void)args; (void)n; (void)product;
     return ray_error("nyi", "append prototype requires Linux FICLONE");
 #else
-    if (n != 2) return ray_error("arity", "append prototype needs a path and numeric table");
+    if (n != (product ? 3 : 2)) return ray_error("arity", "append requires path, table and shared sym path");
     if (!args[0] || args[0]->type != -RAY_STR || !args[1] || args[1]->type != RAY_TABLE)
         return ray_error("type", "append prototype needs a path and numeric table");
+    if (product && (!args[2] || args[2]->type != -RAY_STR))
+        return ray_error("type", "append requires a shared sym path");
     const char* root = ray_str_ptr(args[0]);
+    const char* sym_path = product ? ray_str_ptr(args[2]) : NULL;
     ray_t* tail = args[1];
     ray_t* shape_error = ray_table_validate_rectangular(tail, "append prototype");
     if (shape_error) return shape_error;
@@ -1760,8 +1786,25 @@ ray_t* ray_proto_reflink_append_fn(ray_t** args, int64_t n) {
     ray_splay_write_t w;
     ray_err_t err = ray_splay_write_begin(root, &w);
     if (err != RAY_OK) return ray_error(ray_err_code_str(err), NULL);
+    w.append = product;
     if (!w.staged || w.cur_err != RAY_OK) err = RAY_ERR_DOMAIN;
-    ray_t* old = err == RAY_OK ? ray_read_splayed(root, NULL) : NULL;
+    ray_fd_t sym_lock = RAY_FD_INVALID;
+    ray_sym_domain_t* dom = NULL;
+    if (err == RAY_OK && product) {
+        char lockpath[1100];
+        int z = snprintf(lockpath, sizeof lockpath, "%s.lk", sym_path);
+        if (!sym_path[0] || z < 0 || (size_t)z >= sizeof lockpath) err = RAY_ERR_RANGE;
+        else {
+            sym_lock = ray_file_open(lockpath, RAY_OPEN_READ | RAY_OPEN_WRITE | RAY_OPEN_CREATE);
+            if (sym_lock == RAY_FD_INVALID) err = RAY_ERR_IO;
+            else if (ray_file_lock_ex(sym_lock) != RAY_OK) { ray_file_close(sym_lock); sym_lock = RAY_FD_INVALID; err = RAY_ERR_IO; }
+        }
+        if (err == RAY_OK) {
+            dom = ray_sym_domain_open(sym_path);
+            if (!dom) err = RAY_ERR_IO;
+        }
+    }
+    ray_t* old = err == RAY_OK ? ray_read_splayed(root, sym_path) : NULL;
     if (err == RAY_OK && (!old || RAY_IS_ERR(old))) err = RAY_ERR_IO;
     if (err == RAY_OK && ray_table_ncols(old) != ncols)
         err = RAY_ERR_TYPE;
@@ -1769,6 +1812,8 @@ ray_t* ray_proto_reflink_append_fn(ray_t** args, int64_t n) {
     if (err == RAY_OK && (old_rows < 0 || tail_rows > (INT64_MAX - 32) / 8 - old_rows))
         err = RAY_ERR_RANGE;
     char src[1100], dst[1100];
+    /* Validate the whole schema and storage before any symbol is interned or
+     * any column clone is made. A late mismatch cannot leave a partial table. */
     for (int64_t c = 0; err == RAY_OK && c < ncols; c++) {
         if (ray_table_get_col_enc_idx(old, c) || ray_table_get_col_enc_idx(tail, c)) {
             err = RAY_ERR_DOMAIN; break;
@@ -1777,7 +1822,83 @@ ray_t* ray_proto_reflink_append_fn(ray_t** args, int64_t n) {
         ray_t* add = ray_table_col_idx(tail, c);
         int64_t id = ray_table_col_name(old, c);
         ray_t* name = ray_sym_str(id);
-        if (!prior || !add || (prior->type != RAY_I64 && prior->type != RAY_TIMESTAMP) ||
+        if (!prior || !add || (prior->type != RAY_I64 && prior->type != RAY_TIMESTAMP &&
+             !(product && (prior->type == RAY_SYM || prior->type == RAY_STR))) ||
+            prior->type != add->type || ray_table_col_name(tail, c) != id ||
+            prior->len != old_rows || add->len != tail_rows || !name ||
+            !splay_col_name_safe(ray_str_ptr(name), ray_str_len(name))) {
+            err = RAY_ERR_TYPE; break;
+        }
+        if (ray_link_has(prior) || ray_link_has(add) ||
+            ((prior->type == RAY_STR || prior->type == RAY_SYM) &&
+             (add->attrs & RAY_ATTR_SLICE))) { err = RAY_ERR_DOMAIN; break; }
+        int z = snprintf(src, sizeof src, "%s/%s", w.cur, ray_str_ptr(name));
+        if (z < 0 || (size_t)z >= sizeof src) { err = RAY_ERR_RANGE; break; }
+        uint8_t gen = 0;
+        err = ray_col_file_gen_err(src, &gen);
+        if (err != RAY_OK) break;
+        if (gen != 0) { err = RAY_ERR_DOMAIN; break; }
+        char link[1106];
+        snprintf(link, sizeof link, "%s.link", src);
+        struct stat st;
+        if (lstat(link, &st) == 0) { err = RAY_ERR_DOMAIN; break; }
+        if (errno != ENOENT) { err = RAY_ERR_IO; break; }
+        err = ray_col_save_preflight(add);
+        if (err != RAY_OK) break;
+        if (prior->type == RAY_STR) {
+            uint64_t a = prior->str_pool ? (uint64_t)prior->str_pool->len : 0;
+            uint64_t b = add->str_pool ? (uint64_t)add->str_pool->len : 0;
+            if (a > UINT32_MAX || b > UINT32_MAX - a ||
+                old_rows > (INT64_MAX - 64) / 16 - tail_rows) err = RAY_ERR_RANGE;
+        }
+    }
+    if (err == RAY_OK && product) {
+        /* Existing ancestors may have been created by an earlier unsynced
+         * writer. Sync all of them before this append promises durability. */
+        char chain[1024];
+        snprintf(chain, sizeof chain, "%s", w.dir);
+        for (;;) {
+            err = ray_file_sync_dir(chain);
+            if (err != RAY_OK) break;
+            char* slash = strrchr(chain, '/');
+            if (!slash || slash == chain) break;
+            *slash = '\0';
+        }
+        if (err == RAY_OK) err = append_checkpoint("chain");
+        for (int64_t c = 0; err == RAY_OK && c < ncols; c++) {
+            ray_t* add = ray_table_col_idx(tail, c);
+            if (add->type != RAY_SYM) continue;
+            for (int64_t i = 0; i < tail_rows; i++) {
+                ray_t* atom = ray_sym_vec_cell(add, i);
+                if (!atom || RAY_IS_ERR(atom)) { err = RAY_ERR_CORRUPT; break; }
+                if (ray_sym_domain_intern(dom, ray_str_ptr(atom), ray_str_len(atom)) < 0) {
+                    err = RAY_ERR_OOM; break;
+                }
+            }
+        }
+        if (err == RAY_OK && (uint64_t)ray_sym_domain_count(dom) > UINT32_MAX)
+            err = RAY_ERR_RANGE;
+        if (err == RAY_OK) err = ray_sym_domain_flush_locked(dom, true);
+        /* flush is a no-op if the vocabulary did not grow. Still establish
+         * durability for a symfile created by a previous non-durable writer. */
+        if (err == RAY_OK) {
+            ray_fd_t fd = ray_file_open(sym_path, RAY_OPEN_READ | RAY_OPEN_WRITE);
+            if (fd == RAY_FD_INVALID) err = RAY_ERR_IO;
+            else { err = ray_file_sync(fd); ray_file_close(fd); }
+        }
+        if (err == RAY_OK) err = ray_file_sync_dir(sym_path);
+        if (err == RAY_OK) err = append_checkpoint("sym");
+    }
+    for (int64_t c = 0; err == RAY_OK && c < ncols; c++) {
+        if (ray_table_get_col_enc_idx(old, c) || ray_table_get_col_enc_idx(tail, c)) {
+            err = RAY_ERR_DOMAIN; break;
+        }
+        ray_t* prior = ray_table_col_idx(old, c);
+        ray_t* add = ray_table_col_idx(tail, c);
+        int64_t id = ray_table_col_name(old, c);
+        ray_t* name = ray_sym_str(id);
+        if (!prior || !add || (prior->type != RAY_I64 && prior->type != RAY_TIMESTAMP &&
+             !(product && (prior->type == RAY_SYM || prior->type == RAY_STR))) ||
             add->type != prior->type ||
             ray_table_col_name(tail, c) != id || add->len != tail_rows || !name ||
             !splay_col_name_safe(ray_str_ptr(name), ray_str_len(name))) {
@@ -1797,6 +1918,24 @@ ray_t* ray_proto_reflink_append_fn(ray_t** args, int64_t n) {
         if (link_len < 0 || (size_t)link_len >= sizeof sidecar) { err = RAY_ERR_RANGE; break; }
         if (lstat(sidecar, &link_stat) == 0) { err = RAY_ERR_DOMAIN; break; }
         if (errno != ENOENT) { err = RAY_ERR_IO; break; }
+        char checkpoint[64];
+        snprintf(checkpoint, sizeof checkpoint, "clone-%" PRId64, c);
+        if (product && (err = append_checkpoint(checkpoint)) != RAY_OK) break;
+        if (product && (prior->type == RAY_SYM || prior->type == RAY_STR)) {
+            /* These variable-width layouts are reconstructed in a fresh
+             * generation; all numeric/temporal columns use FICLONE. */
+            ray_col_stream_t stream;
+            memset(&stream, 0, sizeof stream);
+            err = ray_col_stream_open(&stream, w.dir, id, prior->type,
+                                      prior->type == RAY_SYM ? dom : NULL, 0);
+            if (err == RAY_OK) err = ray_col_stream_append(&stream, prior);
+            if (err == RAY_OK) err = ray_col_stream_append(&stream, add);
+            if (err == RAY_OK) err = ray_col_stream_close(&stream, true);
+            if (err != RAY_OK) ray_col_stream_abort(&stream);
+            snprintf(checkpoint, sizeof checkpoint, "column-%" PRId64, c);
+            if (err == RAY_OK) err = append_checkpoint(checkpoint);
+            continue;
+        }
         int fd = p3_clone_file(src, dst);
         if (fd < 0) { err = RAY_ERR_IO; break; }
         ray_t hdr;
@@ -1816,6 +1955,8 @@ ray_t* ray_proto_reflink_append_fn(ray_t** args, int64_t n) {
                 !p3_write_all(fd, &hdr, 32) || fsync(fd)) err = RAY_ERR_IO;
         }
         if (close(fd) != 0 && err == RAY_OK) err = RAY_ERR_IO;
+        snprintf(checkpoint, sizeof checkpoint, "column-%" PRId64, c);
+        if (err == RAY_OK && product) err = append_checkpoint(checkpoint);
     }
     if (err == RAY_OK) {
         int a = snprintf(src, sizeof src, "%s/.d", w.cur);
@@ -1828,12 +1969,28 @@ ray_t* ray_proto_reflink_append_fn(ray_t** args, int64_t n) {
             else {
                 if (fsync(schema)) err = RAY_ERR_IO;
                 if (close(schema)) err = RAY_ERR_IO;
+                if (err == RAY_OK && product) err = append_checkpoint("schema");
             }
         }
     }
     if (old) ray_release(old);
+    if (dom) ray_sym_domain_release(dom);
+    if (sym_lock != RAY_FD_INVALID) {
+        (void)ray_file_unlock(sym_lock);
+        ray_file_close(sym_lock);
+    }
     err = ray_splay_write_finish(&w, err, true);
+    if (err != RAY_OK && product && w.published)
+        return ray_error("commit", "append published; reconcile before retrying");
     if (err != RAY_OK) return ray_error(ray_err_code_str(err), "reflink append prototype failed");
     return ray_i64(old_rows + tail_rows);
 #endif
+}
+
+ray_t* ray_proto_reflink_append_fn(ray_t** args, int64_t n) {
+    return splay_reflink_append(args, n, false);
+}
+
+ray_t* ray_splayed_append_fn(ray_t** args, int64_t n) {
+    return splay_reflink_append(args, n, true);
 }

@@ -39,6 +39,8 @@ typedef struct {
     bool locked;
     bool unlink_lock;       /* lock failed with nobody holding it: remove the file */
     bool staged;
+    bool append;           /* preserve prior generations; append-specific fault checkpoints */
+    bool published;        /* manifest rename succeeded, even if final directory sync fails */
     uint64_t* before;       /* in-place: inodes in root when the lock was taken */
     size_t nbefore;
     bool before_known;

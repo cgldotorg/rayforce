@@ -330,6 +330,10 @@ const char* ray_sym_domain_path(ray_sym_domain_t* dom);
  * own persistence). */
 ray_err_t ray_sym_domain_flush(ray_sym_domain_t* dom, bool durable);
 
+/* Caller must hold an exclusive flock on <domain path>.lk from before the
+ * domain was opened through this call; the caller retains the lock. */
+ray_err_t ray_sym_domain_flush_locked(ray_sym_domain_t* dom, bool durable);
+
 /* Append the entries interned since the last flush to the symfile in place
  * (header count rewritten after the records), instead of rewriting the
  * whole file through a tmp + rename.  For a symfile one writer builds

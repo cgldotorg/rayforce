@@ -1,0 +1,23 @@
+;; @requires: linux
+(.sys.exec "rm -rf /tmp/rfl_product_schema_append; mkdir -p /tmp/rfl_product_schema_append") -- 0
+(set D "/tmp/rfl_product_schema_append/table")
+(set S "/tmp/rfl_product_schema_append/.sym")
+(set olddata (table [instrument_id ts_recv ts_event bid_px ask_px bid_sz ask_sz raw_symbol parent] (list [1 2] (as 'TIMESTAMP [123 0N]) (as 'TIMESTAMP [0N 234]) [10 20] [11 21] [2 3] [4 5] (as 'STR ["short" "a long raw option symbol"]) (as 'SYMBOL ["AAA" "BBB"]))))
+(.db.splayed.set D olddata S {compress: false})
+(set old (.db.splayed.get D S))
+(set add (table [instrument_id ts_recv ts_event bid_px ask_px bid_sz ask_sz raw_symbol parent] (list [3 4] (as 'TIMESTAMP [345 456]) (as 'TIMESTAMP [567 0N]) [30 40] [31 41] [6 7] [8 9] (as 'STR ["" "another very long option symbol"]) (as 'SYMBOL ["CCC" "AAA"]))))
+(.db.splayed.append D add S) -- 4
+(count old) -- 2
+(at old 'instrument_id) -- [1 2]
+(set now (.db.splayed.get D S))
+(count now) -- 4
+(at now 'instrument_id) -- [1 2 3 4]
+(at now 'ts_recv) -- (as 'TIMESTAMP [123 0N 345 456])
+(at now 'ts_event) -- (as 'TIMESTAMP [0N 234 567 0N])
+(at now 'bid_px) -- [10 20 30 40]
+(at now 'ask_px) -- [11 21 31 41]
+(at now 'bid_sz) -- [2 3 6 7]
+(at now 'ask_sz) -- [4 5 8 9]
+(at now 'raw_symbol) -- (as 'STR ["short" "a long raw option symbol" "" "another very long option symbol"])
+(as 'STR (at now 'parent)) -- (as 'STR ["AAA" "BBB" "CCC" "AAA"])
+(.sys.exec "rm -rf /tmp/rfl_product_schema_append") -- 0
