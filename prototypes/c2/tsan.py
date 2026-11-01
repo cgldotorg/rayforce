@@ -4,6 +4,8 @@ from pathlib import Path
 root=Path(sys.argv[1]).resolve(); out=Path(sys.argv[2]).resolve(); out.mkdir(exist_ok=True)
 env=os.environ.copy()
 env['RAYFORCE_CORES']='4'
+scratch=out/'scratch';scratch.mkdir(exist_ok=True)
+env['RAY_TEST_TMPDIR']=str(scratch)
 env['TSAN_OPTIONS']=f'suppressions={root}/.tsan-suppressions history_size=7 second_deadlock_stack=1 halt_on_error=1'
 os.sched_setaffinity(0,sorted(os.sched_getaffinity(0))[:4])
 results=[]

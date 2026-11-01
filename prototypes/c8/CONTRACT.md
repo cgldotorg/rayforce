@@ -1,7 +1,8 @@
 # C8: launch-bound restricted append contract
 
 Written 2026-11-01 before C8 implementation. Proposed prototype contract;
-REPORT.md will distinguish tested results from pending obligations.
+REPORT.md distinguishes tested results from remaining proof limits. The original
+pre-implementation contract is committed at `76181b1e`.
 
 ## 1. Capability surface
 
@@ -45,7 +46,7 @@ test includes a positive baseline database-read control to make this limitation
 visible. Same-user filesystem races are outside the launch trust boundary.
 
 Counterexamples/tests: changing the date or adding a path argument must return
-`access` (denial table); a launch root or partition escape link must be rejected
+`access` (denial table); a launch root containing a partition/symbol escape link must be rejected
 before serving; a forbidden call immediately following append must still return
 `access` (flag restoration regression); a saved host-hook source diff must be
 empty; the parsed restricted-registration lists must match exactly.
@@ -57,8 +58,9 @@ table value, and a DATE value. Tables use the existing serializer's ordered
 column representation, not CSV or interpolated source text. The server's
 existing inbound frame cap remains in force. The exact encoded minute size
 and cap are recorded from the actual nine-column payload; 1.2 MB in the brief
-is an estimate, not a guaranteed size. Oversized or malformed frames remain
-subject to normal decoder validation.
+is an estimate, not a guaranteed size. An oversized inbound header must be rejected before its body is accepted;
+`checks.py` sends cap+1 and requires connection close. The existing decoder
+remains unchanged; this suite does not prove exhaustive malformed-frame safety.
 
 ## 5. Durability and visibility
 
@@ -69,3 +71,13 @@ query on the same restricted connection sees the extra rows. If remount fails
 after publish, the error must disclose that commit may already have happened.
 The integration test uses Northline's supervisor and wire codec in an isolated
 Northline worktree, with the certified crate fixtures and candidate binary.
+
+Counterexamples/tests for sections 1, 2, 4 and 5: `checks.py` sends past/future
+dates, paths, disabled configuration and an escape symlink; checks all nine
+fields of a real minute; checks cap+1 rejection and the encoded request size;
+then forces the post-publish remount to fail by moving the root at the observed
+debug stop and requires `commit`, old held binding and newly persisted rows.
+The same-connection supervisor test repeats the allowed append and forbidden
+operations through Northline's actual request queue. No test establishes a
+quota, protection against same-user filesystem mutation, physical power-loss
+recovery, or exhaustive absence of evaluator authorization bugs.
