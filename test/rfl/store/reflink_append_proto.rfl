@@ -1,0 +1,35 @@
+;; @requires: linux
+(.sys.exec "rm -rf /tmp/rfl_reflink_append_proto") -- 0
+(set D "/tmp/rfl_reflink_append_proto")
+(set O (table [id ts] (list [1 2] (as 'TIMESTAMP [123 0N]))))
+(.db.splayed.set D O {compress: false})
+(set old (.db.splayed.get D))
+(set A (table [id ts] (list [3 0N] (as 'TIMESTAMP [456 789]))))
+(.db.splayed.append_proto D A) -- 4
+(list (count old) (at (at old 'id) 0) (nil? (at (at old 'ts) 1))) -- (list 2 1 true)
+(set R (.db.splayed.get D))
+(count R) -- 4
+(at R 'id) -- [1 2 3 0N]
+(at R 'ts) -- (as 'TIMESTAMP [123 0N 456 789])
+(nil? (at (at R 'ts) 1)) -- true
+(.db.splayed.append_proto D (table [id ts] (list [4] [1]))) !- type
+(set R2 (.db.splayed.get D))
+(at R2 'id) -- [1 2 3 0N]
+(at R2 'ts) -- (as 'TIMESTAMP [123 0N 456 789])
+(set dim (table [v] (list [100 200])))
+(.db.splayed.append_proto D (table [id ts] (list (.col.link 'dim [1]) (as 'TIMESTAMP [999])))) !- domain
+(at (.db.splayed.get D) 'id) -- [1 2 3 0N]
+(set L "/tmp/rfl_reflink_append_proto_linked")
+(.sys.exec "rm -rf /tmp/rfl_reflink_append_proto_linked") -- 0
+(.db.splayed.set L (table [id ref] (list [1 2] (.col.link 'dim [0 1]))) {compress: false})
+(.db.splayed.append_proto L (table [id ref] (list [3] [1]))) !- domain
+(set linked (.db.splayed.get L))
+(list (count linked) (.col.link? (at linked 'ref)) (.col.target (at linked 'ref))) -- (list 2 true 'dim)
+(.sys.exec "rm -rf /tmp/rfl_reflink_append_proto_linked") -- 0
+(set C "/tmp/rfl_reflink_append_proto_compressed")
+(.sys.exec "rm -rf /tmp/rfl_reflink_append_proto_compressed") -- 0
+(.db.splayed.set C O {compress: true})
+(.db.splayed.append_proto C A) !- domain
+(count (.db.splayed.get C)) -- 2
+(.sys.exec "rm -rf /tmp/rfl_reflink_append_proto_compressed") -- 0
+(.sys.exec "rm -rf /tmp/rfl_reflink_append_proto") -- 0
