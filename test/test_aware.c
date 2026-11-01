@@ -4709,24 +4709,40 @@ static const aw_sk_q_t* aw_str_key_queries(void) {
  * (pred_sel_drive and the expression selection, whose rowsel builders are
  * per grain), the scalar route and the other grain users answer as
  * unclamped. */
+/* Each of the original 13 shapes at both capacities is independently
+ * schedulable. Keep one list for wrapper generation and registration so no
+ * shape can silently disappear from the parallel suite. */
+#define POOL_CLAMP_CASES(X) \
+    X(scalar_route_mixed) \
+    X(eq_runs_lack) \
+    X(filter_encoded_leaves) \
+    X(scalar_route_stats) \
+    X(count_on_runs) \
+    X(group_count_on_runs) \
+    X(topk_prune_cases) \
+    X(gather_sym_points) \
+    X(sort_head_late) \
+    X(group_topn_ties) \
+    X(group_topn_nulls) \
+    X(group_topn_affine) \
+    X(group_affine_nulls)
+
+static test_result_t pool_clamp_case(test_func_t fn, uint32_t cap) {
+    (void)ray_test_rm_rf(aw_root()); (void)ray_test_mkdir_p(aw_root());
+    ray_pool_test_ring_fail(cap);
+    g_aw_unaligned = true;
+    test_result_t r = fn();
+    g_aw_unaligned = false;
+    ray_pool_test_ring_fail(0);
+    return r;
+}
+#define CLAMP_WRAPPERS(name) \
+    static test_result_t clamp7_##name(void) { return pool_clamp_case(test_##name, 7); } \
+    static test_result_t clamp3_##name(void) { return pool_clamp_case(test_##name, 3); }
+POOL_CLAMP_CASES(CLAMP_WRAPPERS)
+#undef CLAMP_WRAPPERS
+
 static test_result_t test_pool_clamp(void) {
-    static test_result_t (*const fns[])(void) = {
-        test_scalar_route_mixed, test_eq_runs_lack, test_filter_encoded_leaves, test_scalar_route_stats,
-        test_count_on_runs, test_group_count_on_runs, test_topk_prune_cases,
-        test_gather_sym_points, test_sort_head_late, test_group_topn_ties, test_group_topn_nulls,
-        test_group_topn_affine, test_group_affine_nulls,
-    };
-    static const uint32_t caps[] = { 7, 3 };
-    for (size_t c = 0; c < sizeof caps / sizeof *caps; c++)
-        for (size_t i = 0; i < sizeof fns / sizeof *fns; i++) {
-            (void)ray_test_rm_rf(aw_root()); (void)ray_test_mkdir_p(aw_root());
-            ray_pool_test_ring_fail(caps[c]);
-            g_aw_unaligned = true;
-            test_result_t r = fns[i]();
-            g_aw_unaligned = false;
-            ray_pool_test_ring_fail(0);
-            if (r.status != TEST_PASS) return r;
-        }
     /* generation-0 callers of the grain: fused where (pred_sel_drive and the
      * expression selection), count distinct by group (cdpg_*), and the sort's
      * sortedness estimate, on an in-memory table */
@@ -5533,7 +5549,12 @@ const test_entry_t aware_entries[] = {
     { "aware/scalar_route_time",   test_scalar_route_time,   aw_setup, aw_teardown },
     { "aware/scalar_route_float_inf", test_scalar_route_float_inf, aw_setup, aw_teardown },
     { "aware/unaligned_grain",     test_unaligned_grain,     aw_setup, aw_teardown },
-    { "aware/pool_clamp",          test_pool_clamp,          aw_setup, aw_teardown },
+    { "aware/pool_clamp/dispatch", test_pool_clamp, aw_setup, aw_teardown },
+#define CLAMP_ENTRIES(name) \
+    { "aware/pool_clamp/7/" #name, clamp7_##name, aw_setup, aw_teardown }, \
+    { "aware/pool_clamp/3/" #name, clamp3_##name, aw_setup, aw_teardown },
+    POOL_CLAMP_CASES(CLAMP_ENTRIES)
+#undef CLAMP_ENTRIES
     { "aware/count_on_runs",       test_count_on_runs,       aw_setup, aw_teardown },
     { "aware/group_count_on_runs", test_group_count_on_runs, aw_setup, aw_teardown },
     { "aware/topk_prune_cases",    test_topk_prune_cases,    aw_setup, aw_teardown },

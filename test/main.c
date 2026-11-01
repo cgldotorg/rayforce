@@ -96,6 +96,8 @@ void ray_test_fatal(const char* fmt, ...) {
 /* ─── ANSI colors (disabled when not a TTY) ──────────────────────── */
 
 static int g_color = 0;
+static bool g_list_only = false;
+static const char* g_exact = NULL;
 #define C_RESET   (g_color ? "\x1b[0m"  : "")
 #define C_GREEN   (g_color ? "\x1b[32m" : "")
 #define C_RED     (g_color ? "\x1b[31m" : "")
@@ -866,6 +868,7 @@ static void print_status(test_status_t s, double ms, const char* msg) {
 }
 
 static int run_one(const test_entry_t* e, int* pass, int* fail, int* skip) {
+    if (g_list_only) { puts(e->name); return 0; }
     printf("  %-52s  ", e->name);
     fflush(stdout);
 
@@ -900,6 +903,7 @@ static int run_one(const test_entry_t* e, int* pass, int* fail, int* skip) {
 }
 
 static int name_matches_filter(const char* name, const char* filter) {
+    if (g_exact && strcmp(name, g_exact) != 0) return 0;
     if (!filter || !*filter) return 1;
     return strstr(name, filter) != NULL;
 }
@@ -960,7 +964,7 @@ void ray_test_hooks_off(void) {
 
 /* ---- Per-process scratch root (declared in test.h) ---- */
 
-static char   g_tmp_root[64];   /* "/tmp/rayforce_t.<pid>", set in main() */
+static char   g_tmp_root[4096]; /* RAY_TEST_TMPDIR/rayforce_t.<pid> */
 static size_t g_tmp_root_len;
 
 /* A "/tmp" path starts at s[i]: "/tmp" as a whole path component, not part
@@ -1127,12 +1131,18 @@ int main(int argc, char** argv) {
         if ((strcmp(argv[i], "--filter") == 0 || strcmp(argv[i], "-f") == 0)
             && i + 1 < argc) {
             filter = argv[++i];
+        } else if (strcmp(argv[i], "--exact") == 0 && i + 1 < argc) {
+            g_exact = argv[++i];
+        } else if (strcmp(argv[i], "--list") == 0) {
+            g_list_only = true;
         } else if (strcmp(argv[i], "--census") == 0 && i + 1 < argc) {
             g_census = fopen(argv[++i], "w");
             if (!g_census) { fprintf(stderr, "cannot open census file\n"); return 2; }
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            printf("Usage: %s [-f SUBSTR] [--census PATH]\n", argv[0]);
+            printf("Usage: %s [-f SUBSTR] [--exact NAME] [--list] [--census PATH]\n", argv[0]);
             printf("  -f, --filter SUBSTR   Only run tests whose name contains SUBSTR.\n");
+            printf("  --exact NAME          Run exactly one named test (including equiv/).\n");
+            printf("  --list                List selected names without running tests.\n");
             printf("  --census PATH         Record .rfl lines whose grouping ran on the legacy ladder.\n");
             return 0;
         } else {
@@ -1142,10 +1152,15 @@ int main(int argc, char** argv) {
     }
 
     if (g_census) setvbuf(g_census, NULL, _IOLBF, 0);   /* closed by the OS at exit; lines land as written */
-    snprintf(g_tmp_root, sizeof g_tmp_root, "/tmp/rayforce_t.%ld", (long)getpid());
-    (void)ray_test_rm_rf(g_tmp_root);                    /* a dead run's leftovers under a reused pid */
-    if (ray_test_mkdir_p(g_tmp_root) != 0) { fprintf(stderr, "cannot create %s\n", g_tmp_root); return 2; }
-    g_tmp_root_len = strlen(g_tmp_root);
+    if (!g_list_only) {
+        const char* tmp = getenv("RAY_TEST_TMPDIR");
+        if (!tmp || !*tmp) tmp = "/tmp";
+        int n = snprintf(g_tmp_root, sizeof g_tmp_root, "%s/rayforce_t.%ld", tmp, (long)getpid());
+        if (n < 0 || (size_t)n >= sizeof g_tmp_root) { fprintf(stderr, "scratch path too long\n"); return 2; }
+        (void)ray_test_rm_rf(g_tmp_root);
+        if (ray_test_mkdir_p(g_tmp_root) != 0) { fprintf(stderr, "cannot create %s\n", g_tmp_root); return 2; }
+        g_tmp_root_len = strlen(g_tmp_root);
+    }
     const char* rfl_root = getenv("RFL_ROOT");
     if (!rfl_root || !*rfl_root) rfl_root = "test/rfl";
     if (rfl_scan(rfl_root) < 0) return 2;
@@ -1159,7 +1174,8 @@ int main(int argc, char** argv) {
             if (!name_matches_filter(g[i].name, filter)) continue;
             /* large/ tests need several GiB of RAM and disk: only on request */
             if (strncmp(g[i].name, "large/", 6) == 0 &&
-                !(filter && strncmp(filter, "large/", 6) == 0)) continue;
+                !(filter && strncmp(filter, "large/", 6) == 0) &&
+                !(g_exact && strncmp(g_exact, "large/", 6) == 0)) continue;
             total++;
             run_one(&g[i], &pass, &fail, &skip);
         }
@@ -1209,11 +1225,16 @@ int main(int argc, char** argv) {
         run_one(&e, &pass, &fail, &skip);
     }
 
-    (void)ray_test_rm_rf(g_tmp_root);
+    if (!g_list_only) (void)ray_test_rm_rf(g_tmp_root);
+    if (total == 0 || (g_exact && total != 1)) {
+        fprintf(stderr, "test selection matched %d cases%s\n", total, g_exact ? " (expected exactly one)" : "");
+        return 2;
+    }
+    if (g_list_only) return 0;
 
     printf("\n%s=== %d of %d passed (%d skipped, %d failed) ===%s\n",
            fail ? C_RED : (skip ? C_YELLOW : C_GREEN),
            pass, total, skip, fail, C_RESET);
 
-    return fail ? 1 : 0;
+    return fail ? 1 : (g_exact && skip == total ? 77 : 0);
 }

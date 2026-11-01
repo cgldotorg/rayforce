@@ -445,11 +445,11 @@ static test_result_t test_sym_distinct_cancel_at_dispatch(void) {
  * keys seen again in later runs, nulls among the keys, one to three keys
  * (a SYM one, a computed one), each read in place and by range from a
  * compressed file.  Keys without runs keep the radix route. */
-#define CRUN_DIR "/tmp/rayforce_test_count_runs/t/"
+#define CRUN_DIR "rayforce_test_count_runs/t/"
 static test_result_t test_count_runs_route(void) {
     ray_pool_destroy();
     TEST_ASSERT_EQ_I(ray_pool_init_total(4), RAY_OK);
-    (void)ray_test_rm_rf("/tmp/rayforce_test_count_runs");
+    (void)ray_test_rm_rf("rayforce_test_count_runs");
     /* 1.2M rows: runs of 5 over 60011 keys, each seen in 4 runs (the last
      * few keys in 3); k sparse 64-bit, h the same as I32, z zeros for the
      * radix twin, n a key with nulls, s a SYM of the key (the null symbol
@@ -529,7 +529,7 @@ static test_result_t test_count_runs_route(void) {
         }
     r = ray_eval_str("(set CM 0)");
     if (r) ray_release(r);
-    (void)ray_test_rm_rf("/tmp/rayforce_test_count_runs");
+    (void)ray_test_rm_rf("rayforce_test_count_runs");
     PASS();
 }
 
@@ -3516,7 +3516,7 @@ static test_result_t test_radix_topn_waves_gen2(void) {
  * grouping kernels report their rows, so every route below reads ahead.
  * Results must equal the same selects over the in-memory table.
  * -------------------------------------------------------------------------- */
-#define PFS_ROOT "/tmp/rayforce_test_pf_select"
+#define PFS_ROOT "rayforce_test_pf_select"
 #define PFS_DIR  PFS_ROOT "/t/"
 
 static bool pfs_evict(void) {
@@ -3791,15 +3791,17 @@ static test_result_t test_cd_gate_read_ahead(void) {
     (void)ray_test_rm_rf(PFS_ROOT);
 
     /* The gate over a selection sparser than a row per page: the pages of
-     * the sampled rows alone are asked for.  k3 (272 MB, 66,406 pages; a
+     * the sampled rows alone are asked for.  k3 (320 MB, 78,125 pages; a
      * million values) over 33,000 rows, one to every other page: 32,768
      * of them are sampled, read as distinct, and the estimate stands at
      * the span, a million — past the sample's reach and short of the
      * many-groups mark — so the count is confirmed in full, over the half
-     * of the column the estimate never touched. */
-    enum { N3 = 34000000, SEL3 = 33000 };
+     * of the column the estimate never touched. Leave a 48 MB tail beyond
+     * the last sampled row: filesystem read-ahead around the sampled pages
+     * must not warm every residency probe and bypass the cold-column path. */
+    enum { N3 = 40000000, SEL3 = 33000 };
     r = ray_eval_str(
-        "(set pfs_j (til 34000000))"
+        "(set pfs_j (til 40000000))"
         "(set pfs_t (table [k3 x3] (list (% (* pfs_j 7919) 1000000) (as 'U8 (% pfs_j 200)))))"
         "(set pfs_j 0)"
         "(.db.splayed.set \"" PFS_DIR "\" pfs_t)"
@@ -4336,18 +4338,18 @@ static test_result_t test_cd_bounded_select(void) {
         " (set T3 (table [k f w kc ov uq nv a] (list (at (concat [0N] (til 96)) (% i 97))"
         "   (at [0Nf 1.5 -0.0 2.5 0.0 3.5] (% i 6)) (as 'I32 (% (* i 7919) 3000)) (* 0 i) (+ 7 (* 0 i)) i"
         "   (at [0N] (* 0 i)) (% i 5))))"
-        " (.sys.exec \"rm -rf /tmp/rayforce_test_cdb\")"
+        " (.sys.exec \"rm -rf rayforce_test_cdb\")"
         " (set Z (as 'SYM (as 'STR (+ 2000000 (til 40000)))))"
         " (set K (as 'SYM (as 'STR (+ 3000000 (til 100)))))"
         " (set j (til 100000))"
-        " (.db.splayed.set \"/tmp/rayforce_test_cdb/2024.01.01/t/\" (table [v k c] (list (at Z (% j 40000)) (at K (% j 100)) j)))"
-        " (.db.splayed.set \"/tmp/rayforce_test_cdb/2024.01.02/t/\" (table [v k c] (list (at Z (% (* j 7919) 3000)) (at K (% j 100)) j)))"
-        " (set P (.db.parted.get \"/tmp/rayforce_test_cdb/\" 't))"
+        " (.db.splayed.set \"rayforce_test_cdb/2024.01.01/t/\" (table [v k c] (list (at Z (% j 40000)) (at K (% j 100)) j)))"
+        " (.db.splayed.set \"rayforce_test_cdb/2024.01.02/t/\" (table [v k c] (list (at Z (% (* j 7919) 3000)) (at K (% j 100)) j)))"
+        " (set P (.db.parted.get \"rayforce_test_cdb/\" 't))"
         " (set m (til 30000))"
-        " (.db.splayed.set \"/tmp/rayforce_test_cdb/r/2024.01.01/t/\" (table [k v] (list (% m 10) (% m 1000))))"
-        " (.db.splayed.set \"/tmp/rayforce_test_cdb/r/2024.01.02/t/\" (table [k v] (list (% m 10) (+ 500 (% m 1000)))))"
-        " (.db.splayed.set \"/tmp/rayforce_test_cdb/r/2024.01.03/t/\" (table [k] (list (% m 10))))"
-        " (set R (.db.parted.get \"/tmp/rayforce_test_cdb/r/\" 't)) 0)");
+        " (.db.splayed.set \"rayforce_test_cdb/r/2024.01.01/t/\" (table [k v] (list (% m 10) (% m 1000))))"
+        " (.db.splayed.set \"rayforce_test_cdb/r/2024.01.02/t/\" (table [k v] (list (% m 10) (+ 500 (% m 1000)))))"
+        " (.db.splayed.set \"rayforce_test_cdb/r/2024.01.03/t/\" (table [k] (list (% m 10))))"
+        " (set R (.db.parted.get \"rayforce_test_cdb/r/\" 't)) 0)");
     TEST_ASSERT_TRUE(setup && !RAY_IS_ERR(setup)); ray_release(setup);
     static const struct { const char* query; const char* oracle; bool kernel; } q[] = {
         { "(at (select {u: (count (distinct v)) s: (sum a) from: T by: k asc: k}) 'u)",
@@ -4416,7 +4418,7 @@ static test_result_t test_cd_bounded_select(void) {
         TEST_ASSERT_EQ_I(tot->i64, 42940);
         ray_release(tot);
     }
-    ray_t* rm = ray_eval_str("(do (set P 0) (set R 0) (.sys.exec \"rm -rf /tmp/rayforce_test_cdb\"))");
+    ray_t* rm = ray_eval_str("(do (set P 0) (set R 0) (.sys.exec \"rm -rf rayforce_test_cdb\"))");
     if (rm) ray_release(rm);
     PASS();
 }

@@ -1,0 +1,207 @@
+{
+  "date_utc": "2026-11-01",
+  "machine": "AMD Threadripper PRO 5975WX; 32 cores / 64 threads; 125 GiB RAM",
+  "scope": "Local build/test workflow; runtime algorithms unchanged",
+  "baseline_note": "Historical O0 serial build+test log took 46m24s and failed two missing-xxd cases; not a controlled passing benchmark. Intermediate failed runs are not used as speedup evidence.",
+  "test_runs": {
+    "32_processes_broad_locks": {
+      "selected": 6584,
+      "passed": 6569,
+      "failed": [],
+      "skipped": [
+        "pool/scan_read_ahead_new_pool",
+        "pool/scan_read_ahead",
+        "heap/lock_rlimit_fallback",
+        "heap/lock_unmap",
+        "csv/splayed_cancel_hash",
+        "pool/scan_read_ahead_queries",
+        "heap/lock_big_direct",
+        "heap/lock_pool_under_watermark",
+        "heap/lock_back_in_service",
+        "heap/lock_bound",
+        "heap/lock_dead_memory",
+        "heap/lock_refusal_remembered",
+        "heap/lock_not_past_watermark",
+        "heap/lock_release_pages",
+        "heap/lock_trim"
+      ],
+      "test_seconds": 128.579,
+      "build_seconds": 0.476,
+      "jobs": 32,
+      "test_cpu_seconds": 2180.025,
+      "average_busy_cores": 16.95,
+      "runtime_workers": 2,
+      "build_jobs": 32,
+      "build_config": "ccache clang\nclang version 23.1.3\n-fPIC -Wall -Wextra -Werror -Wstrict-prototypes -Wno-unused-parameter -Wno-error=invalid-feature-combination -std=c17 -g -march=native -DDEBUG -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -O1 -fdebug-prefix-map=/home/gunazzi/lead-linux/rayforce-perf=.\n-fuse-ld=lld -fsanitize=address,undefined -lm -lpthread -rdynamic\n-Iinclude -Isrc\n-fno-fast-math -fno-unsafe-math-optimizations -fno-associative-math -fno-reciprocal-math -fsigned-zeros -ffp-contract=off\n",
+      "commit": "8dd08ef8c4ad832e6f76efcf4a2f49510e4cba22",
+      "local_report": "build/check/20261101T140057-2191469"
+    },
+    "64_processes_broad_locks": {
+      "selected": 6584,
+      "passed": 6569,
+      "failed": [],
+      "skipped": [
+        "pool/scan_read_ahead_queries",
+        "pool/scan_read_ahead_new_pool",
+        "pool/scan_read_ahead",
+        "heap/lock_rlimit_fallback",
+        "csv/splayed_cancel_hash",
+        "heap/lock_pool_under_watermark",
+        "heap/lock_release_pages",
+        "heap/lock_not_past_watermark",
+        "heap/lock_big_direct",
+        "heap/lock_bound",
+        "heap/lock_dead_memory",
+        "heap/lock_trim",
+        "heap/lock_refusal_remembered",
+        "heap/lock_unmap",
+        "heap/lock_back_in_service"
+      ],
+      "test_seconds": 140.7,
+      "build_seconds": 0.0,
+      "jobs": 64,
+      "test_cpu_seconds": 3079.2,
+      "average_busy_cores": 21.88,
+      "runtime_workers": 2,
+      "build_jobs": 32,
+      "build_config": "ccache clang\nclang version 23.1.3\n-fPIC -Wall -Wextra -Werror -Wstrict-prototypes -Wno-unused-parameter -Wno-error=invalid-feature-combination -std=c17 -g -march=native -DDEBUG -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -O1 -fdebug-prefix-map=/home/gunazzi/lead-linux/rayforce-perf=.\n-fuse-ld=lld -fsanitize=address,undefined -lm -lpthread -rdynamic\n-Iinclude -Isrc\n-fno-fast-math -fno-unsafe-math-optimizations -fno-associative-math -fno-reciprocal-math -fsigned-zeros -ffp-contract=off\n",
+      "commit": "8dd08ef8c4ad832e6f76efcf4a2f49510e4cba22",
+      "local_report": "build/check/20261101T140330-2237306"
+    },
+    "32_processes_refined_locks": {
+      "selected": 6584,
+      "passed": 6569,
+      "failed": [],
+      "skipped": [
+        "pool/scan_read_ahead_queries",
+        "pool/scan_read_ahead_new_pool",
+        "heap/lock_rlimit_fallback",
+        "pool/scan_read_ahead",
+        "heap/lock_not_past_watermark",
+        "heap/lock_pool_under_watermark",
+        "heap/lock_back_in_service",
+        "heap/lock_dead_memory",
+        "csv/splayed_cancel_hash",
+        "heap/lock_unmap",
+        "heap/lock_big_direct",
+        "heap/lock_refusal_remembered",
+        "heap/lock_bound",
+        "heap/lock_release_pages",
+        "heap/lock_trim"
+      ],
+      "test_seconds": 101.336,
+      "build_seconds": 0.523,
+      "jobs": 32,
+      "test_cpu_seconds": 2122.006,
+      "average_busy_cores": 20.94,
+      "runtime_workers": 2,
+      "build_jobs": 32,
+      "build_config": "ccache clang\nclang version 23.1.3\n-fPIC -Wall -Wextra -Werror -Wstrict-prototypes -Wno-unused-parameter -Wno-error=invalid-feature-combination -std=c17 -g -march=native -DDEBUG -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -O1 -fdebug-prefix-map=/home/gunazzi/lead-linux/rayforce-perf=.\n-fuse-ld=lld -fsanitize=address,undefined -lm -lpthread -rdynamic\n-Iinclude -Isrc\n-fno-fast-math -fno-unsafe-math-optimizations -fno-associative-math -fno-reciprocal-math -fsigned-zeros -ffp-contract=off\n",
+      "commit": "8dd08ef8c4ad832e6f76efcf4a2f49510e4cba22",
+      "local_report": "build/check/20261101T140628-2285864"
+    }
+  },
+  "profile_builds": [
+    {
+      "step": "release-native",
+      "compiled": 121,
+      "linked": 1,
+      "log": "build/check/20261101T140810-2293853/build.log",
+      "build_seconds": 11.41,
+      "wall_seconds_including_reservation_wait": 65.635
+    },
+    {
+      "step": "release-noop",
+      "compiled": 0,
+      "linked": 0,
+      "log": "build/check/20261101T140821-2332327/build.log",
+      "build_seconds": 0.47,
+      "wall_seconds_including_reservation_wait": 0.552
+    },
+    {
+      "step": "release-portable",
+      "compiled": 121,
+      "linked": 1,
+      "log": "build/check/20261101T140822-2332416/build.log",
+      "build_seconds": 10.44,
+      "wall_seconds_including_reservation_wait": 10.521
+    },
+    {
+      "step": "release-native-cached",
+      "compiled": 121,
+      "linked": 1,
+      "log": "build/check/20261101T140832-2333747/build.log",
+      "build_seconds": 1.15,
+      "wall_seconds_including_reservation_wait": 1.243
+    },
+    {
+      "step": "debug",
+      "compiled": 121,
+      "linked": 1,
+      "log": "build/check/20261101T140834-2334653/build.log",
+      "build_seconds": 7.07,
+      "wall_seconds_including_reservation_wait": 7.16
+    },
+    {
+      "step": "debug-noop",
+      "compiled": 0,
+      "linked": 0,
+      "log": "build/check/20261101T140841-2336446/build.log",
+      "build_seconds": 0.57,
+      "wall_seconds_including_reservation_wait": 0.653
+    },
+    {
+      "step": "release-switch",
+      "compiled": 0,
+      "linked": 0,
+      "log": "build/check/20261101T140841-2336529/build.log",
+      "build_seconds": 0.52,
+      "wall_seconds_including_reservation_wait": 0.608
+    },
+    {
+      "step": "hardened",
+      "compiled": 121,
+      "linked": 1,
+      "log": "build/check/20261101T140842-2336630/build.log",
+      "build_seconds": 15.3,
+      "wall_seconds_including_reservation_wait": 15.387
+    },
+    {
+      "step": "hardened-noop",
+      "compiled": 0,
+      "linked": 0,
+      "log": "build/check/20261101T140857-2338352/build.log",
+      "build_seconds": 0.47,
+      "wall_seconds_including_reservation_wait": 0.557
+    },
+    {
+      "step": "lib",
+      "compiled": 120,
+      "linked": 0,
+      "log": "build/check/20261101T140858-2338424/build.log",
+      "build_seconds": 10.89,
+      "wall_seconds_including_reservation_wait": 10.976
+    },
+    {
+      "step": "lib-noop",
+      "compiled": 0,
+      "linked": 0,
+      "log": "build/check/20261101T140909-2339802/build.log",
+      "build_seconds": 0.46,
+      "wall_seconds_including_reservation_wait": 0.544
+    }
+  ],
+  "cached_full_sanitizer_rebuild_seconds": 2.177,
+  "other_checks": {
+    "runner_regressions": 5,
+    "legacy_O0_srccheck": 11,
+    "inventory": "6584 unique default cases; 1337 equivalence cases; large tests remain opt-in"
+  },
+  "source_sha256": {
+    "Makefile": "3e32a54781709dfa9c4694c8874cc7c544b3054812e79db186e0bc53aa5008e7",
+    "scripts/check.py": "bd0b39486cc2c11c3a7fd0236220ad47b48f1d2f145069998d583379b47b1169",
+    "test/main.c": "8eefc6cd0e918e6624a5e72cb09038a407070758b7d40355b90aaf5d183edb36",
+    "test/test_aware.c": "d5d332fbbdc1a2597749034adb650d378f48dd45256935a96476a329bcfc1c8c",
+    "test/test_agg_contract.c": "5c3efd7e37b1578acd723ac72071616c3f50de3695aa8772358005c4af2cbe00"
+  }
+}

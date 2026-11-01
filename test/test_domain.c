@@ -60,8 +60,10 @@
 #include <stdatomic.h>
 #include <time.h>       /* nanosleep: a later modification time */
 
-#define TMP_DOM_SYM_PATH "/tmp/rayforce_test_domain_sym"
-#define TMP_DOM_COL_PATH "/tmp/rayforce_test_domain_col"
+/* Relative fixtures belong to the runner's isolated working directory.
+ * Keep these string literals: callers append suffixes such as ".ix". */
+#define TMP_DOM_SYM_PATH "rayforce_test_domain_sym"
+#define TMP_DOM_COL_PATH "rayforce_test_domain_col"
 
 /* ---- Setup / Teardown -------------------------------------------------- */
 
@@ -751,7 +753,7 @@ static test_result_t test_domain_create_flush_concurrent(void) {
  * deterministically (freed pages often stay mapped), so this is not a
  * hard pre/post oracle — it is an ASan-backed guard that the recycle +
  * reopen stays clean and the drop hook keeps the cache coherent. */
-#define TMP_DOM_RECYCLE_PATH "/tmp/rayforce_test_domain_recycle_sym"
+#define TMP_DOM_RECYCLE_PATH "rayforce_test_domain_recycle_sym"
 static test_result_t test_domain_survives_heap_recycle(void) {
     unlink(ray_test_tmp(TMP_DOM_RECYCLE_PATH));
     unlink(ray_test_tmp(TMP_DOM_RECYCLE_PATH ".lk"));
@@ -1080,7 +1082,7 @@ static test_result_t test_domain_pivot_index_adopts(void) {
 
 /* ---- Phase 2 Task 3: query.c resolution / re-expression ------------------ */
 
-#define TMP_DOM_QSYM_PATH "/tmp/rayforce_test_domain_qsym"
+#define TMP_DOM_QSYM_PATH "rayforce_test_domain_qsym"
 
 /* Build a DIVERGENT file-domain fixture: a symfile in which the
  * positions of "dq_a"/"dq_b" are SWAPPED relative to the current
@@ -2355,7 +2357,7 @@ static test_result_t test_domain_concat_text_nulls(void) {
     PASS();
 }
 
-#define TMP_DOM_BADSYM_PATH "/tmp/rayforce_test_domain_badsym"
+#define TMP_DOM_BADSYM_PATH "rayforce_test_domain_badsym"
 
 /* Position 0: ray_sym_save-produced files carry "" at position 0 (global
  * id 0) and open fine; an EMPTY vocabulary is fine. */
