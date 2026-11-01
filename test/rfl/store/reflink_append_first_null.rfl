@@ -1,0 +1,17 @@
+;; @requires: linux
+(.sys.exec "rm -rf /tmp/rfl_reflink_append_first_null") -- 0
+(set D "/tmp/rfl_reflink_append_first_null")
+(set initial (table [id ts px] (list [1 2] (as 'TIMESTAMP [123 456]) [11 12])))
+(.db.splayed.set D initial {compress: false})
+(set old (.db.splayed.get D))
+(count (select {from: old where: (nil? ts)})) -- 0
+(count (select {from: old where: (nil? px)})) -- 0
+(set tail (table [id ts px] (list [3 4] (as 'TIMESTAMP [0N 789]) [13 0N])))
+(.db.splayed.append_proto D tail) -- 4
+(set current (.db.splayed.get D))
+(at (select {from: current where: (nil? ts)}) 'id) -- [3]
+(at (select {from: current where: (nil? px)}) 'id) -- [4]
+(nil? (at (at current 'ts) 2)) -- true
+(count (select {from: old where: (nil? ts)})) -- 0
+(count (select {from: old where: (nil? px)})) -- 0
+(.sys.exec "rm -rf /tmp/rfl_reflink_append_first_null") -- 0
