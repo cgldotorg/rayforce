@@ -74,8 +74,10 @@
 #include <sys/wait.h>
 #endif
 
-#define TMP_COL_PATH  "/tmp/rayforce_test_col.dat"
-#define TMP_SPLAY_DIR "/tmp/rayforce_test_splay"
+/* Each parallel worker has its own working directory. Relative literals
+ * preserve suffix concatenation while isolating these shared fixtures. */
+#define TMP_COL_PATH  "rayforce_test_col.dat"
+#define TMP_SPLAY_DIR "rayforce_test_splay"
 
 /* ---- Setup / Teardown -------------------------------------------------- */
 
@@ -830,7 +832,7 @@ static test_result_t test_parted_release(void) {
 
 /* ---- test_part_open ---------------------------------------------------- */
 
-#define TMP_PART_DB "/tmp/rayforce_test_parted_db"
+#define TMP_PART_DB "rayforce_test_parted_db"
 #define TMP_TABLE_NAME "test_tbl"
 
 static test_result_t test_part_open(void) {
@@ -1364,7 +1366,7 @@ static test_result_t test_col_save_load_table(void) {
 
 /* ---- test_file_open_close ---------------------------------------------- */
 
-#define TMP_FILEIO_PATH "/tmp/rayforce_test_fileio.dat"
+#define TMP_FILEIO_PATH "rayforce_test_fileio.dat"
 
 static test_result_t test_file_open_close(void) {
     /* Open for write+create, then close */
@@ -4070,8 +4072,8 @@ static test_result_t test_sym_col_valid_roundtrip(void) {
 
 /* ---- test_splay_load_with_sym ------------------------------------------ */
 
-#define TMP_SPLAY_SYM_DIR "/tmp/rayforce_test_splay_sym"
-#define TMP_SYM_PATH      "/tmp/rayforce_test_splay_sym_file"
+#define TMP_SPLAY_SYM_DIR "rayforce_test_splay_sym"
+#define TMP_SYM_PATH      "rayforce_test_splay_sym_file"
 
 static test_result_t test_splay_load_with_sym(void) {
     (void)ray_test_rm_rf(ray_test_tmp(TMP_SPLAY_SYM_DIR));
@@ -4828,7 +4830,7 @@ static test_result_t test_serde_dict_roundtrip(void) {
 
 /* ---- serde coverage: ray_obj_save / ray_obj_load ------------------------- */
 
-#define TMP_SERDE_PATH "/tmp/rayforce_serde_test.rfl"
+#define TMP_SERDE_PATH "rayforce_serde_test.rfl"
 
 static test_result_t test_serde_obj_save_load(void) {
     /* Save and load an I64 vec */
@@ -6399,7 +6401,7 @@ static test_result_t test_ipc_restricted(void) {
 
 /* ---- IPC restricted mode: .db.parted.drop ------------------------------- */
 
-#define TMP_DROP_RO_DB "/tmp/rayforce_test_parted_drop_ro"
+#define TMP_DROP_RO_DB "rayforce_test_parted_drop_ro"
 
 static test_result_t test_ipc_restricted_parted_drop(void) {
     ray_runtime_t* rt = ray_runtime_create(0, NULL);
@@ -7162,7 +7164,7 @@ static test_result_t test_stream_str_hash_persisted(void) {
 /* A second ray_read_parted of the same root returns the very same segment
  * vectors for partitions whose files did not change, loads a replaced
  * partition afresh, and ray_parted_cache_clear forgets everything. */
-#define TMP_PARTED_ROOT "/tmp/rayforce_test_parted_remount"
+#define TMP_PARTED_ROOT "rayforce_test_parted_remount"
 static ray_t* parted_remount_part(int64_t base) {
     int64_t raw[3] = { base, base + 1, base + 2 };
     ray_t* v = ray_vec_from_raw(RAY_I64, raw, 3);

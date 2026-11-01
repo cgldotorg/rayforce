@@ -1,8 +1,11 @@
 # GNU make predefines CC=cc, so ?= cannot select clang as the default.
 # Keep command-line and environment overrides intact.
 ifeq ($(origin CC),default)
-CC = clang
+CC = $(if $(shell command -v ccache 2>/dev/null),ccache )clang
 endif
+export CCACHE_DIR ?= $(HOME)/.cache/rayforce-ccache
+export CCACHE_BASEDIR ?= $(CURDIR)
+export CCACHE_MAXSIZE ?= 10G
 # Some targets need clang specifically regardless of $(CC): the fuzzing
 # runtime (-fsanitize=fuzzer) and -MJ compilation-database fragments are
 # clang-only.  Same precedent as `make coverage`, which pins CC=clang.
@@ -188,6 +191,12 @@ HARDENED_CFLAGS = -fPIC $(WARNS) -std=$(STD) -O3 -march=$(RAY_MARCH) -g \
 # the whole suite that way.
 NDEBUG_CFLAGS = $(DEBUG_CFLAGS) -DNDEBUG
 
+# Fast local correctness checks retain DEBUG, ASan and UBSan. Separate
+# objects and executables keep this profile independent of debug/release.
+CHECK_OPT ?= -O1
+FAST_CFLAGS = $(filter-out -O0,$(DEBUG_CFLAGS)) $(CHECK_OPT) -fdebug-prefix-map=$(CURDIR)=.
+LOCAL_LINK_FLAGS ?=
+
 # Strict IEEE arithmetic for the ALP / ALP_RD codec (compressed-columns P5):
 # its decode is a fixed expression (spec "ALP") and must give the same bits
 # in every build profile, so reassociation, contraction and signed-zero
@@ -224,6 +233,9 @@ NDEBUG_MAIN_OBJ = $(MAIN_SRC:.c=.ndebug.o)
 NDEBUG_TEST_OBJ = $(TEST_SRC:.c=.ndebug.o)
 RELT_LIB_OBJ  = $(LIB_SRC:.c=.reltest.o)
 RELT_TEST_OBJ = $(TEST_SRC:.c=.reltest.o)
+FAST_LIB_OBJ = $(LIB_SRC:.c=.fast.o)
+FAST_MAIN_OBJ = $(MAIN_SRC:.c=.fast.o)
+FAST_TEST_OBJ = $(TEST_SRC:.c=.fast.o)
 
 # Auto-generated header dependencies (one .d per .o, see DEPFLAGS).
 # The fragments are -included at the very END of this file — including
@@ -235,7 +247,8 @@ DEPS = $(LIB_OBJ:.o=.d) $(MAIN_OBJ:.o=.d) $(TEST_OBJ:.o=.d) \
        $(TSAN_LIB_OBJ:.o=.d) $(TSAN_MAIN_OBJ:.o=.d) $(TSAN_TEST_OBJ:.o=.d) \
        $(HARD_LIB_OBJ:.o=.d) $(HARD_MAIN_OBJ:.o=.d) \
        $(NDEBUG_LIB_OBJ:.o=.d) $(NDEBUG_MAIN_OBJ:.o=.d) $(NDEBUG_TEST_OBJ:.o=.d) \
-       $(RELT_LIB_OBJ:.o=.d) $(RELT_TEST_OBJ:.o=.d)
+       $(RELT_LIB_OBJ:.o=.d) $(RELT_TEST_OBJ:.o=.d) \
+       $(FAST_LIB_OBJ:.o=.d) $(FAST_MAIN_OBJ:.o=.d) $(FAST_TEST_OBJ:.o=.d)
 
 # Default target (pinned so an -included .d fragment can't steal it).
 .DEFAULT_GOAL := default
@@ -264,6 +277,49 @@ default: debug
 %.ndebug.o: %.c
 	$(CC) -c $(NDEBUG_CFLAGS) $(FP_STRICT_$*) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
 
+%.fast.o: %.c
+	$(CC) -c $(FAST_CFLAGS) $(FP_STRICT_$*) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
+
+# Rebuild when compiler/flags change, without rebuilding on a no-op check.
+.PHONY: fast-config-force
+build/.fast-config: fast-config-force
+	@mkdir -p build
+	@printf '%s\n' '$(CC)' '$(shell $(CC) --version | head -n 1)' '$(FAST_CFLAGS)' '$(LOCAL_LINK_FLAGS) $(DEBUG_LDFLAGS) $(LIBS) $(EXPORT_LDFLAGS)' '$(INCLUDES)' '$(STRICT_FP_CFLAGS)' > $@.tmp
+	@cmp -s $@.tmp $@ && rm -f $@.tmp || mv -f $@.tmp $@
+
+$(FAST_LIB_OBJ) $(FAST_MAIN_OBJ) $(FAST_TEST_OBJ): build/.fast-config
+
+# Make otherwise cannot distinguish cached native objects from portable v3
+# objects, or notice a changed compiler. Keep flavour stamps incremental.
+define PROFILE_CONFIG
+build/.$(1)-config: fast-config-force
+	@mkdir -p build
+	@printf '%s\n' '$(CC)' '$(shell $(CC) --version | head -n 1)' '$($(2))' '$(LOCAL_LINK_FLAGS) $($(4)) $(LIBS) $(EXPORT_LDFLAGS)' '$(INCLUDES)' '$(STRICT_FP_CFLAGS)' > $$@.tmp
+	@cmp -s $$@.tmp $$@ && rm -f $$@.tmp || mv -f $$@.tmp $$@
+$(3): build/.$(1)-config
+endef
+$(eval $(call PROFILE_CONFIG,lib,LIB_CFLAGS,$(LIB_LIB_OBJ),RELEASE_LDFLAGS))
+$(eval $(call PROFILE_CONFIG,release,RELEASE_CFLAGS,$(REL_LIB_OBJ) $(REL_MAIN_OBJ),RELEASE_LDFLAGS))
+$(eval $(call PROFILE_CONFIG,hardened,HARDENED_CFLAGS,$(HARD_LIB_OBJ) $(HARD_MAIN_OBJ),RELEASE_LDFLAGS))
+$(eval $(call PROFILE_CONFIG,debug,CFLAGS,$(LIB_OBJ) $(MAIN_OBJ) $(TEST_OBJ),LDFLAGS))
+
+$(TARGET).fast: $(FAST_LIB_OBJ) $(FAST_MAIN_OBJ)
+	$(CC) $(FAST_CFLAGS) $(LOCAL_LINK_FLAGS) -o $@ $^ $(LIBS) $(DEBUG_LDFLAGS) $(EXPORT_LDFLAGS)
+
+$(TARGET).test.fast: $(FAST_LIB_OBJ) $(FAST_TEST_OBJ)
+	$(CC) $(FAST_CFLAGS) $(LOCAL_LINK_FLAGS) -o $@ $^ $(LIBS) $(DEBUG_LDFLAGS) $(EXPORT_LDFLAGS)
+
+test-fast-build: $(TARGET).fast $(TARGET).test.fast
+
+# The launcher chooses CPU/RAM-aware jobs, uses ccache when installed, and
+# runs isolated CTest cases. make check is the recommended local entrypoint.
+check:
+	+python3 scripts/check.py $(CHECK_ARGS)
+
+BUILD_TARGET ?= release
+build-local:
+	+python3 scripts/check.py --build-only --build-target $(BUILD_TARGET) $(BUILD_ARGS)
+
 # The C suite in the RELEASE FP profile (`make test-release`).  Its own object
 # flavour: the release flags plus -DDEBUG, because the suite calls test
 # seams compiled only under DEBUG (platform.h, ipc.h, lang/internal.h);
@@ -277,7 +333,7 @@ default: debug
 # accessors, the REPL and crash banners, .sys.build, and the test that compares
 # ray_git_commit against GIT_HASH), in every object flavour.
 BUILD_INFO_SRCS := src/core/types src/app/repl src/core/crash src/ops/system test/test_types
-BUILD_INFO_OBJS := $(foreach v,.o .rel.o .lib.o .fuzz.o .tsan.o .hard.o .ndebug.o .reltest.o,$(addsuffix $(v),$(BUILD_INFO_SRCS)))
+BUILD_INFO_OBJS := $(foreach v,.o .rel.o .lib.o .fuzz.o .tsan.o .hard.o .ndebug.o .reltest.o .fast.o,$(addsuffix $(v),$(BUILD_INFO_SRCS)))
 $(BUILD_INFO_OBJS): $(BUILD_INFO_STAMP)
 
 # Main binary for debug/test (some tests spawn ./$(TARGET) as a server).
@@ -287,15 +343,23 @@ $(TARGET): $(LIB_OBJ) $(MAIN_OBJ)
 # Debug build
 debug: CFLAGS = $(DEBUG_CFLAGS)
 debug: LDFLAGS = $(DEBUG_LDFLAGS)
-debug: $(LIB_OBJ) $(MAIN_OBJ)
-	$(CC) $(CFLAGS) -o $(TARGET) $(LIB_OBJ) $(MAIN_OBJ) $(LIBS) $(LDFLAGS) $(EXPORT_LDFLAGS)
+debug: $(TARGET).debug
+	@cmp -s $< $(TARGET) || { cp $< $(TARGET).tmp && mv -f $(TARGET).tmp $(TARGET); }
+
+$(TARGET).debug: $(LIB_OBJ) $(MAIN_OBJ)
+	$(CC) $(CFLAGS) $(LOCAL_LINK_FLAGS) -o $@ $(LIB_OBJ) $(MAIN_OBJ) $(LIBS) $(LDFLAGS) $(EXPORT_LDFLAGS)
 
 # Release build
-release: $(REL_LIB_OBJ) $(REL_MAIN_OBJ)
-	$(CC) $(RELEASE_CFLAGS) -o $(TARGET) $(REL_LIB_OBJ) $(REL_MAIN_OBJ) $(LIBS) $(RELEASE_LDFLAGS) $(EXPORT_LDFLAGS)
+release: $(TARGET).release
+	@cmp -s $< $(TARGET) || { cp $< $(TARGET).tmp && mv -f $(TARGET).tmp $(TARGET); }
+
+$(TARGET).release: $(REL_LIB_OBJ) $(REL_MAIN_OBJ)
+	$(CC) $(RELEASE_CFLAGS) $(LOCAL_LINK_FLAGS) -o $@ $(REL_LIB_OBJ) $(REL_MAIN_OBJ) $(LIBS) $(RELEASE_LDFLAGS) $(EXPORT_LDFLAGS)
 
 # Static library
-lib: $(LIB_LIB_OBJ)
+lib: lib$(TARGET).a
+
+lib$(TARGET).a: $(LIB_LIB_OBJ)
 	rm -f lib$(TARGET).a
 	$(AR) rc lib$(TARGET).a $(LIB_LIB_OBJ)
 
@@ -393,6 +457,8 @@ endif
 # Tests.  Depends on $(TARGET) because test/rfl/system/ipc_diff.rfl
 # spawns ./$(TARGET) as an IPC server via .sys.exec — both binaries
 # must exist on disk and share the build flavour (sanitizers, coverage).
+test-fast-build: $(HOSTFN_LIBS)
+
 test: CFLAGS = $(DEBUG_CFLAGS)
 test: LDFLAGS = $(DEBUG_LDFLAGS)
 test: $(LIB_OBJ) $(MAIN_OBJ) $(TEST_OBJ) $(HOSTFN_LIBS)
@@ -461,8 +527,11 @@ tsan-test: $(TSAN_LIB_OBJ) $(TSAN_TEST_OBJ) $(HOSTFN_LIBS)
 # crash handler resolves function NAMES (not just module+offset) in a
 # production trace.  Worth the slightly larger symbol table for a cloud
 # binary whose crashes must be diagnosable from logs alone.
-hardened: $(HARD_LIB_OBJ) $(HARD_MAIN_OBJ)
-	$(CC) $(HARDENED_CFLAGS) -o $(TARGET) $(HARD_LIB_OBJ) $(HARD_MAIN_OBJ) $(LIBS) $(RELEASE_LDFLAGS) -rdynamic
+hardened: $(TARGET).hardened
+	@cmp -s $< $(TARGET) || { cp $< $(TARGET).tmp && mv -f $(TARGET).tmp $(TARGET); }
+
+$(TARGET).hardened: $(HARD_LIB_OBJ) $(HARD_MAIN_OBJ)
+	$(CC) $(HARDENED_CFLAGS) $(LOCAL_LINK_FLAGS) -o $@ $(HARD_LIB_OBJ) $(HARD_MAIN_OBJ) $(LIBS) $(RELEASE_LDFLAGS) -rdynamic
 
 # Coverage report.  Builds both binaries with clang source-based
 # instrumentation, runs the test suite (writing one .profraw per
@@ -616,10 +685,12 @@ clean:
 	-rm -f $(FUZZ_LIB_OBJ) $(TSAN_LIB_OBJ) $(TSAN_MAIN_OBJ) $(TSAN_TEST_OBJ) \
 	       $(HARD_LIB_OBJ) $(HARD_MAIN_OBJ) \
 	       $(NDEBUG_LIB_OBJ) $(NDEBUG_MAIN_OBJ) $(NDEBUG_TEST_OBJ) \
-	       $(RELT_LIB_OBJ) $(RELT_TEST_OBJ)
+	       $(RELT_LIB_OBJ) $(RELT_TEST_OBJ) $(FAST_LIB_OBJ) $(FAST_MAIN_OBJ) $(FAST_TEST_OBJ)
 	-rm -f $(DEPS)
 	-rm -f $(TARGET) $(TARGET).test $(TARGET).test.rel lib$(TARGET).a
 	-rm -f $(TARGET).tsan $(TARGET).test.tsan
+	-rm -f $(TARGET).fast $(TARGET).test.fast
+	-rm -f $(TARGET).debug $(TARGET).release $(TARGET).hardened $(TARGET).tmp
 	-rm -rf build build_release build_fuzz build_compdb dist
 	-rm -rf "$(STAGE_ROOT)/rayforce"
 	-rm -f "$(STAGE_ROOT)/rayforce.h"
@@ -629,7 +700,7 @@ clean:
 	-rm -f cov-*.profraw default.profraw coverage.profdata
 	-rm -rf coverage_html
 
-.PHONY: check-wasm32-layout default debug release lib dist install-headers test test-ndebug test-release test-large coverage compdb tsan tsan-test hardened fuzz-smoke tidy cppcheck clean
+.PHONY: build-local check test-fast-build check-wasm32-layout default debug release lib dist install-headers test test-ndebug test-release test-large coverage compdb tsan tsan-test hardened fuzz-smoke tidy cppcheck clean
 
 # Header dependencies last: .d fragments only add prerequisites to the
 # object targets above, and being last they can't hijack the default goal.

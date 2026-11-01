@@ -1612,6 +1612,9 @@ static test_result_t test_eval_select_timeseries_primitives(void) {
 
 /* ---- Test: time-series kernels surface pool cancellation ---- */
 static test_result_t test_eval_timeseries_interrupt_cancel(void) {
+    /* ray_cancel is signal-safe and does not lazily create a pool. The
+     * test must establish it itself, independent of preceding tests. */
+    TEST_ASSERT_NOT_NULL(ray_pool_get());
     int64_t n = RAY_MORSEL_ELEMS * 2;
     ray_t* v = ray_vec_new(RAY_I64, n);
     TEST_ASSERT_NOT_NULL(v);

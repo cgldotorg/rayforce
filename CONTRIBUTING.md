@@ -65,6 +65,64 @@ Each flavour compiles to its own object files, so they never clobber one another
 
 ## Tests
 
+### Parallel local checks (Linux/POSIX)
+
+`make check` builds a separate `-O1 -g -march=native` test profile with DEBUG,
+ASan and UBSan enabled, then runs the complete default inventory through CTest.
+It requires Python 3.9+ and CTest (from CMake); ccache and LLVM lld are used when
+available. The ordinary `make test` remains the serial, `-O0` debugging/CI path.
+CTest fits this harness because it already enumerates executable test cases;
+no conversion of the existing C or `.rfl` assertions to LLVM lit is needed.
+
+```sh
+make check                                    # full C, RFL and equivalence suite
+make check CHECK_ARGS='-f store/ -f equiv/store/'
+make check CHECK_ARGS='-j 16 --build-jobs 32 --cores 2'
+make build-local                              # cached native release build
+make build-local BUILD_ARGS='--march x86-64-v3' # portable AVX2 release build
+make build-local BUILD_TARGET=debug
+make build-local BUILD_TARGET=lib             # incremental static library
+python3 scripts/test_check.py                  # runner isolation/cleanup checks
+```
+
+On the 32-core/64-thread Threadripper PRO 5975WX, defaults are 32 compilation
+jobs, 32 test processes and two runtime workers per process. CPU affinity and
+available RAM can reduce the job counts; eight GiB is reserved for other work.
+Use explicit job counts to benchmark alternatives. Each test may override its
+runtime pool for its own assertions. `--no-build` reuses existing binaries;
+`--build-only` builds without testing; `--optimization 0|1|2` changes the check
+profile. Native binaries are for this machine, not redistribution.
+
+Each case gets its own working directory and short scratch root under
+`~/.cache/rft`. Fixtures use the home filesystem instead of filling `/tmp`.
+Fixed-port and server-spawning groups serialize behind a CTest resource lock.
+Cooperating `make check` and `make build-local` runs across worktrees share a
+machine-level reservation, so they cannot each consume the full CPU budget.
+Raw `make test` does not participate; do not run it alongside `make check`.
+Timeouts and interrupts terminate each test's process group, including servers.
+
+Full logs, the exact selected inventory, JUnit results and a timing summary are
+saved in `build/check/<timestamp>-<pid>/`. Missing, duplicate and zero-test
+results fail the run. Large tests remain opt-in (`CHECK_ARGS='-f large/'`),
+and platform-dependent skips stay visible. Golden-file updates belong in the
+serial runner. Historical timings schedule expensive cases early, and each
+source change only rebuilds its dependencies. ccache is shared across
+worktrees at `~/.cache/rayforce-ccache` with a default ten-GiB limit.
+
+Debug, release and hardened executables retain separate outputs before
+selecting `rayforce`, avoiding unnecessary relinks when switching profiles.
+Compiler/flag stamps invalidate objects when the compiler or target CPU changes.
+
+The 2026-11-01 machine check completed 6,569 cases with 15 environment-dependent
+skips and zero failures in 101.34 seconds. A full rebuild of cached sanitizer
+objects took 2.18 seconds; unchanged build profiles took about half a second.
+The initial 32-versus-64 process comparison favored 32 (128.58 versus 140.70
+seconds); narrowing unnecessary network locks then reduced the 32-process run
+to 101.34 seconds. Counts include the original pool-clamp checks split into
+27 separately scheduled cases. See [measurement data](docs/check-throughput-20261101.json).
+
+### Test sources
+
 Behavioural tests live under `test/rfl/<group>/<name>.rfl` and are
 auto-discovered. Add or update a `.rfl` test alongside any behaviour change. Run
 a focused subset with:

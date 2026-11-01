@@ -49,7 +49,8 @@ int ray_test_mkdir_p(const char* path);   /* mkdir -p path */
 
 /* Per-process scratch root.  Every "/tmp/..." path a test names goes
  * through ray_test_tmp(), which returns the string with each "/tmp" path
- * prefix moved under this process's own root (/tmp/rayforce_t.<pid>,
+ * prefix moved under this process's own root (RAY_TEST_TMPDIR/rayforce_t.<pid>,
+ * with RAY_TEST_TMPDIR defaulting to /tmp),
  * created at startup and removed at exit), so two suites running on one
  * host never share a file.  The argument may be a whole Rayfall source or
  * shell line: every "/tmp" path inside it moves.  The result is interned

@@ -68,7 +68,9 @@ static void splay_teardown(void) {
 
 /* ---- helpers ----------------------------------------------------------- */
 
-#define TMP_SPLAY_BASE "/tmp/rayforce_test_splay2"
+/* Includes legacy callers that append suffixes without ray_test_tmp().
+ * A relative base belongs to this worker's private working directory. */
+#define TMP_SPLAY_BASE "rayforce_test_splay2"
 
 /* Remove temp dir tree */
 static void rm_rf(const char* path) {
