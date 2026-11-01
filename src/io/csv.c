@@ -70,6 +70,7 @@
 #ifndef RAY_OS_WINDOWS
 #include <unistd.h>
 #include <sys/mman.h>
+#include <signal.h>
 #endif
 
 /* --------------------------------------------------------------------------
@@ -3531,7 +3532,8 @@ ray_t* ray_read_csv_opts(const char* path, char delimiter, bool header,
 /* Fault injection for the suite: RAY_CSV_SPLAYED_INJECT names where a
  * .csv.splayed load is cancelled: "append" (from column 0's append task,
  * mid-dispatch), "skip" (the last column's append task returns as a
- * skipped ticket does) or "close" (before the column finish dispatch);
+ * skipped ticket does), "close" (before the column finish dispatch), or
+ * "stop_after_sym" (a POSIX process-crash test after the symfile flush);
  * debug builds only.  "skip" raises no interrupt, which a real skip always
  * comes with, so production never reaches it; it is kept because only it
  * reaches the append done-count past the interrupt checks after it. */
@@ -3916,6 +3918,9 @@ static ray_err_t csv_save_splayed_to_dir(const char* path, char delimiter, bool 
             }
         }
     }
+#if defined(DEBUG) && !defined(RAY_OS_WINDOWS)
+    if (err == RAY_OK && csv_splayed_inject("stop_after_sym")) raise(SIGSTOP);
+#endif
     int64_t tr_flush_end = ray_profile_now_ns();
     if (trace) fprintf(stderr, "csv.splayed: symfile_flush=%.1fms\n", TR_MS(tr_flush_end - tr_loop_end));
 

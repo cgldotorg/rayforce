@@ -41,6 +41,10 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#ifndef RAY_OS_WINDOWS
+#include <signal.h>
+#include <sys/wait.h>
+#endif
 
 static char tmp_csv_path[64];
 static const char* tmp_csv(void) {
@@ -2437,6 +2441,17 @@ static int64_t csv_file_size(const char* path) {
     struct stat st;
     return stat(path, &st) == 0 ? (int64_t)st.st_size : -1;
 }
+static bool csv_old_symbols_match(ray_t* t) {
+    if (!t || RAY_IS_ERR(t) || ray_table_nrows(t) != 3) return false;
+    ray_t* col = ray_table_get_col_idx(t, 0);
+    if (!col || col->type != RAY_SYM) return false;
+    const char* expected[] = {"alpha", "beta", "alpha"};
+    for (int i = 0; i < 3; i++) {
+        ray_t* value = ray_sym_vec_cell(col, i);
+        if (!value || strcmp(ray_str_ptr(value), expected[i])) return false;
+    }
+    return true;
+}
 static test_result_t test_csv_splayed_cancel_symfile(void) {
     ray_heap_init(); (void)ray_sym_init();
     char root[128], dir[160], sym[160];
@@ -2463,8 +2478,7 @@ static test_result_t test_csv_splayed_cancel_symfile(void) {
     TEST_ASSERT_EQ_I(e, RAY_ERR_CANCEL);
     TEST_ASSERT_EQ_I(csv_file_size(sym), before);
     ray_t* t = ray_read_splayed(dir, sym);
-    TEST_ASSERT_TRUE(t && !RAY_IS_ERR(t));
-    TEST_ASSERT_EQ_I(ray_table_nrows(t), 3);
+    TEST_ASSERT_TRUE(csv_old_symbols_match(t));
     ray_release(t);
     setenv("RAY_CSV_SPLAYED_INJECT", "close", 1);
     e = ray_csv_save_splayed_shared(TMP_CSV,',',true,types,1,NULL,0,dir,100000,RAY_COMPRESS_ABSENT,sym,true);
@@ -2472,18 +2486,72 @@ static test_result_t test_csv_splayed_cancel_symfile(void) {
     ray_clear_interrupt();
     TEST_ASSERT_EQ_I(e, RAY_ERR_CANCEL);
     t = ray_read_splayed(dir, sym);
-    TEST_ASSERT_TRUE(t && !RAY_IS_ERR(t));
-    TEST_ASSERT_EQ_I(ray_table_nrows(t), 3);
+    TEST_ASSERT_TRUE(csv_old_symbols_match(t));
     ray_release(t);
     csv_test_rm_rf(root);
     unlink(TMP_CSV); ray_sym_destroy(); ray_heap_destroy();
     PASS();
 }
 
+static test_result_t test_csv_splayed_crash_symfile(void) {
+#if !defined(DEBUG) || defined(RAY_OS_WINDOWS)
+    SKIP("requires the POSIX debug stop injection");
+#else
+    ray_heap_init(); (void)ray_sym_init();
+    char root[128], dir[160], sym[160];
+    snprintf(root, sizeof(root), "%s", ray_test_tmp("/tmp/rayforce-csv-crash"));
+    snprintf(dir, sizeof(dir), "%s/table", root);
+    snprintf(sym, sizeof(sym), "%s/shared.sym", root);
+    csv_test_rm_rf(root);
+    TEST_ASSERT_EQ_I(mkdir(root, 0700), 0);
+    int8_t types[] = {RAY_SYM};
+    FILE* f = fopen(TMP_CSV, "w"); TEST_ASSERT_NOT_NULL(f);
+    fputs("s\nalpha\nbeta\nalpha\n", f); fclose(f);
+    TEST_ASSERT_EQ_I(ray_csv_save_splayed_shared(TMP_CSV, ',', true, types, 1, NULL, 0,
+                     dir, 100000, RAY_COMPRESS_ABSENT, sym, true), RAY_OK);
+    f = fopen(TMP_CSV, "w"); TEST_ASSERT_NOT_NULL(f);
+    fputs("s\ngamma\ndelta\n", f); fclose(f);
+    pid_t child = fork();
+    TEST_ASSERT_TRUE(child >= 0);
+    if (child == 0) {
+        setenv("RAY_CSV_SPLAYED_INJECT", "stop_after_sym", 1);
+        ray_err_t err = ray_csv_save_splayed_shared(TMP_CSV, ',', true, types, 1, NULL, 0,
+                        dir, 100000, RAY_COMPRESS_ABSENT, sym, true);
+        _exit(err == RAY_OK ? 0 : 1);
+    }
+    int status = 0;
+    pid_t waited = waitpid(child, &status, WUNTRACED);
+    bool stopped = waited == child && WIFSTOPPED(status) && WSTOPSIG(status) == SIGSTOP;
+    int kill_rc = -1, dead_status = 0;
+    pid_t reaped = -1;
+    if (stopped) { kill_rc = kill(child, SIGKILL); reaped = waitpid(child, &dead_status, 0); }
+    TEST_ASSERT_TRUE(stopped);
+    TEST_ASSERT_EQ_I(kill_rc, 0);
+    TEST_ASSERT_TRUE(reaped == child && WIFSIGNALED(dead_status) && WTERMSIG(dead_status) == SIGKILL);
+    ray_t* old = ray_read_splayed(dir, sym);
+    TEST_ASSERT_TRUE(csv_old_symbols_match(old));
+    ray_release(old);
+    TEST_ASSERT_EQ_I(ray_csv_save_splayed_shared(TMP_CSV, ',', true, types, 1, NULL, 0,
+                     dir, 100000, RAY_COMPRESS_ABSENT, sym, true), RAY_OK);
+    ray_t* recovered = ray_read_splayed(dir, sym);
+    TEST_ASSERT_TRUE(recovered && !RAY_IS_ERR(recovered));
+    TEST_ASSERT_EQ_I(ray_table_nrows(recovered), 2);
+    ray_t* col = ray_table_get_col_idx(recovered, 0);
+    TEST_ASSERT_NOT_NULL(col);
+    TEST_ASSERT_TRUE(!strcmp(ray_str_ptr(ray_sym_vec_cell(col, 0)), "gamma"));
+    TEST_ASSERT_TRUE(!strcmp(ray_str_ptr(ray_sym_vec_cell(col, 1)), "delta"));
+    ray_release(recovered);
+    csv_test_rm_rf(root);
+    unlink(TMP_CSV); ray_sym_destroy(); ray_heap_destroy();
+    PASS();
+#endif
+}
+
 const test_entry_t csv_entries[] = {
     { "csv/splayed_cancel", test_csv_splayed_cancel, NULL, NULL },
     { "csv/splayed_cancel_hash", test_csv_splayed_cancel_hash, NULL, NULL },
     { "csv/splayed_cancel_symfile", test_csv_splayed_cancel_symfile, NULL, NULL },
+    { "csv/splayed_crash_symfile", test_csv_splayed_crash_symfile, NULL, NULL },
     { "csv/splayed_sentinel_literal", test_csv_splayed_sentinel_literal, NULL, NULL },
     { "csv/parted_staging", test_csv_parted_staging, NULL, NULL },
     { "csv/parted_zones", test_csv_parted_zones, NULL, NULL },

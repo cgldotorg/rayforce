@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Compare full-session splayed paths; run inside a measurement reservation."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -11,6 +12,14 @@ import time
 
 binary, source, result_dir = map(lambda p: Path(p).resolve(), sys.argv[1:4])
 result_dir.mkdir(parents=True, exist_ok=False)
+affinity = sorted(os.sched_getaffinity(0))
+cores = int(os.environ.get("P1_BENCH_CORES", len(affinity)))
+if cores < 1:
+    raise ValueError("P1_BENCH_CORES must be positive")
+metadata = {"binary": str(binary), "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+            "source": str(source), "cpu_affinity": affinity, "rayforce_cores": cores,
+            "loadavg_before": os.getloadavg(), "repeats": 3}
+(result_dir / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
 script = Path(__file__).with_name("import.rfl").resolve()
 expected = {"ROWS": "8344972", "INSTRUMENT_SUM": "264400196857973", "PARENTS": "22"}
 records = []
@@ -20,7 +29,7 @@ for i in range(3):
         (root / "2026.10.29").mkdir(parents=True)
         timing = result_dir / f"{mode}-{i + 1}.time"
         cmd = ["/usr/bin/time", "-f", "%M %U %S", "-o", str(timing), str(binary),
-               "-f", str(script), "--", "-csv", str(source), "-db", str(root), "-mode", mode]
+               "-c", str(cores), "-f", str(script), "--", "-csv", str(source), "-db", str(root), "-mode", mode]
         start = time.monotonic_ns()
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         elapsed = (time.monotonic_ns() - start) / 1e9

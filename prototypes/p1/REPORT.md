@@ -1,5 +1,22 @@
 # P1 — durable streaming with a shared symbol file
 
+## Resume using optimized local checks
+
+The original P1 changes are checkpointed in local commit `54361a93`; the
+machine-optimized build/check workflow was cherry-picked as `60acf8aa`. The
+P1 worktree's optimized focused CSV/RFL check passed 81 cases with one
+environment-dependent skip, including both shared-symbol layouts and a new
+POSIX debug process-crash test. The test stops a child immediately after the
+durable shared symbol file flush, kills it, verifies every old symbol remains
+readable, then retries the write and verifies the replacement values. Existing
+cancel tests also check the original symbols, not just the row count. This
+does not simulate a machine reboot or power loss.
+
+The full optimized native sanitizer check selected 6,587 cases and passed
+6,572 with 15 environment-dependent skips; see
+`build/check/20261101T142125-2467969/summary.json`. Native measurement and an
+independent Python CSV-to-stored-table comparison are pending coordination.
+
 This is an isolated experiment based on `8dd08ef8`, not a product binary. The
 prototype adds `.csv.splayed` options `sym_path` and `durable`; the existing
 default remains a local `.sym` and a non-durable bulk write. When `durable` is

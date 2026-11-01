@@ -1,0 +1,6 @@
+(set args (at (.sys.args) 'user))
+(set q (.db.parted.get (at args 'db) 'quotes))
+(set t (table [instrument_id ts_recv ts_event bid_px ask_px bid_sz ask_sz parent]
+  (list (at q 'instrument_id) (at q 'ts_recv) (at q 'ts_event) (at q 'bid_px)
+        (at q 'ask_px) (at q 'bid_sz) (at q 'ask_sz) (at q 'parent))))
+(.csv.write t (at args 'out))
