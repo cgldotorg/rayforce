@@ -3,6 +3,6 @@
 (set dest (at args 'dest))
 (set t (.db.splayed.get src))
 (set off 946684800000000000)
-(set q (table [instrument_id ts_recv ts_event bid_px ask_px bid_sz ask_sz] (list (at t 'instrument_id) (as 'TIMESTAMP (- (at t 'ts_recv) off)) (as 'TIMESTAMP (- (at t 'ts_event) off)) (at t 'bid_px) (at t 'ask_px) (at t 'bid_sz) (at t 'ask_sz))))
-(.db.splayed.set dest q {compress: false})
+(set q (table [instrument_id ts_recv ts_event bid_px ask_px bid_sz ask_sz] (list (.idx.drop (at t 'instrument_id)) (as 'TIMESTAMP (- (at t 'ts_recv) off)) (as 'TIMESTAMP (- (at t 'ts_event) off)) (.idx.drop (at t 'bid_px)) (.idx.drop (at t 'ask_px)) (.idx.drop (at t 'bid_sz)) (.idx.drop (at t 'ask_sz)))))
+(.db.splayed.set dest q {compress: false index: false})
 (println "ROWS" (count (.db.splayed.get dest)))

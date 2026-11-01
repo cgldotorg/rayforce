@@ -34,6 +34,8 @@ for rep in range(1, 4):
         def vals(prefix):
             return [int(x) for x in next(s for s in lines if s.startswith(prefix + ' ')).split()[1:]]
         before, held, fresh, add = (vals(s) for s in ('BEFORE', 'HELD_AFTER', 'FRESH', 'TAIL'))
+        if 'NOINDEX true true true true true true true' not in lines:
+            raise AssertionError('both candidates must write no indexes: ' + done.stdout)
         if before != held or before[0] != rows or fresh[0] != rows + tail or add[0] != tail:
             raise AssertionError(done.stdout)
         if fresh[1] != before[1] + add[1] or fresh[2] != before[2] + add[2]:
@@ -65,5 +67,5 @@ for rep in range(1, 4):
         result = dict(binary=str(binary), binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
                       fixture=str(base), affinity=sorted(os.sched_getaffinity(0)), workers=workers,
                       rows=rows, tail=tail, samples=samples,
-                      caveat='append drops indexes; rewrite rebuilds indexes')
+                      caveat='both candidates omit indexes; no SYM column or compressed data')
         (out / 'results.json').write_text(json.dumps(result, indent=2) + '\n')

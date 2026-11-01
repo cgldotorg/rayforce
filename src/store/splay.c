@@ -1770,8 +1770,11 @@ ray_t* ray_proto_reflink_append_fn(ray_t** args, int64_t n) {
         err = RAY_ERR_RANGE;
     char src[1100], dst[1100];
     for (int64_t c = 0; err == RAY_OK && c < ncols; c++) {
-        ray_t* prior = ray_table_get_col_idx(old, c);
-        ray_t* add = ray_table_get_col_idx(tail, c);
+        if (ray_table_get_col_enc_idx(old, c) || ray_table_get_col_enc_idx(tail, c)) {
+            err = RAY_ERR_DOMAIN; break;
+        }
+        ray_t* prior = ray_table_col_idx(old, c);
+        ray_t* add = ray_table_col_idx(tail, c);
         int64_t id = ray_table_col_name(old, c);
         ray_t* name = ray_sym_str(id);
         if (!prior || !add || (prior->type != RAY_I64 && prior->type != RAY_TIMESTAMP) ||

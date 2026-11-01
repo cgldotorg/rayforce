@@ -43,10 +43,11 @@
 (type .db.splayed) -- 'DICT
 (type .db.parted) -- 'DICT
 (count .db) -- 2          ;; splayed, parted
-(count .db.splayed) -- 2  ;; set, get
+(count .db.splayed) -- 3  ;; set, get, append_proto
 (count .db.parted) -- 4   ;; get, tables, fill, drop
 (nil? (resolve '.db.splayed.set))    -- false
 (nil? (resolve '.db.splayed.get))    -- false
+(nil? (resolve '.db.splayed.append_proto)) -- false
 (nil? (resolve '.db.parted.get))     -- false
 (nil? (resolve '.db.parted.tables))  -- false
 (nil? (resolve '.db.parted.fill))    -- false

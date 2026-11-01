@@ -7,4 +7,5 @@
 (println "HELD_AFTER" (count held) (sum (at held 'instrument_id)) (sum (at held 'bid_sz)))
 (set after (.db.splayed.get root))
 (println "FRESH" (count after) (sum (at after 'instrument_id)) (sum (at after 'bid_sz)))
+(println "NOINDEX" (nil? (.idx.info (at after 'instrument_id))) (nil? (.idx.info (at after 'ts_recv))) (nil? (.idx.info (at after 'ts_event))) (nil? (.idx.info (at after 'bid_px))) (nil? (.idx.info (at after 'ask_px))) (nil? (.idx.info (at after 'bid_sz))) (nil? (.idx.info (at after 'ask_sz))))
 (println "TAIL" (count tail) (sum (at tail 'instrument_id)) (sum (at tail 'bid_sz)))
