@@ -2667,7 +2667,7 @@ static void dom_flush_index(ray_sym_domain_t* dom, int64_t count, uint64_t end) 
     dom_unlock();
 }
 
-ray_err_t ray_sym_domain_flush(ray_sym_domain_t* dom, bool durable) {
+static ray_err_t dom_flush(ray_sym_domain_t* dom, bool durable, bool lock_held) {
     if (!dom) return RAY_ERR_TYPE;
     if (dom->kind == DOM_RUNTIME) return RAY_OK; /* sym.c owns its own files */
     if (dom->kind == DOM_IMPORT) return ray_symimp_sync(dom->imp, durable);
@@ -2685,11 +2685,14 @@ ray_err_t ray_sym_domain_flush(ray_sym_domain_t* dom, bool durable) {
     if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", dom->path) >= (int)sizeof(tmp_path))
         return RAY_ERR_IO;
 
-    ray_fd_t lock_fd = ray_file_open(lock_path,
-                                     RAY_OPEN_READ | RAY_OPEN_WRITE | RAY_OPEN_CREATE);
-    if (lock_fd == RAY_FD_INVALID) return RAY_ERR_IO;
-    ray_err_t err = ray_file_lock_ex(lock_fd);
-    if (err != RAY_OK) { ray_file_close(lock_fd); return err; }
+    ray_fd_t lock_fd = RAY_FD_INVALID;
+    ray_err_t err = RAY_OK;
+    if (!lock_held) {
+        lock_fd = ray_file_open(lock_path, RAY_OPEN_READ | RAY_OPEN_WRITE | RAY_OPEN_CREATE);
+        if (lock_fd == RAY_FD_INVALID) return RAY_ERR_IO;
+        err = ray_file_lock_ex(lock_fd);
+        if (err != RAY_OK) { ray_file_close(lock_fd); return err; }
+    }
 
     /* What to write, read under the flock: no other flush of this file runs
      * now, and while this process holds unflushed entries no reopen
@@ -2706,8 +2709,7 @@ ray_err_t ray_sym_domain_flush(ray_sym_domain_t* dom, bool durable) {
     dom_dir_t* dir = atomic_load_explicit(&dom->atoms, memory_order_relaxed);
     dom_unlock();
     if (count == disk_count) {
-        ray_file_unlock(lock_fd);
-        ray_file_close(lock_fd);
+        if (!lock_held) { ray_file_unlock(lock_fd); ray_file_close(lock_fd); }
         return RAY_OK;
     }
 
@@ -2720,8 +2722,7 @@ ray_err_t ray_sym_domain_flush(ray_sym_domain_t* dom, bool durable) {
         bool exists = (stat(dom->path, &st) == 0);
         if (disk_count == 0) {
             if (exists && st.st_size > 0) {
-                ray_file_unlock(lock_fd);
-                ray_file_close(lock_fd);
+                if (!lock_held) { ray_file_unlock(lock_fd); ray_file_close(lock_fd); }
                 return RAY_ERR_CORRUPT; /* concurrent writer created it */
             }
             /* a new file: an index left by an earlier one under this name
@@ -2741,8 +2742,7 @@ ray_err_t ray_sym_domain_flush(ray_sym_domain_t* dom, bool durable) {
                 if (vf) fclose(vf);
             }
             if (!ok) {
-                ray_file_unlock(lock_fd);
-                ray_file_close(lock_fd);
+                if (!lock_held) { ray_file_unlock(lock_fd); ray_file_close(lock_fd); }
                 return RAY_ERR_CORRUPT; /* concurrent writer */
             }
         }
@@ -2754,8 +2754,7 @@ ray_err_t ray_sym_domain_flush(ray_sym_domain_t* dom, bool durable) {
     {
         FILE* f = fopen(tmp_path, "wb");
         if (!f) {
-            ray_file_unlock(lock_fd);
-            ray_file_close(lock_fd);
+            if (!lock_held) { ray_file_unlock(lock_fd); ray_file_close(lock_fd); }
             return RAY_ERR_IO;
         }
         /* a compressed file keeps its header (the symbol table) and codes
@@ -2835,22 +2834,19 @@ ray_err_t ray_sym_domain_flush(ray_sym_domain_t* dom, bool durable) {
     if (durable) {
         err = ray_file_sync_dir(dom->path);
         if (err != RAY_OK) {
-            ray_file_unlock(lock_fd);
-            ray_file_close(lock_fd);
+            if (!lock_held) { ray_file_unlock(lock_fd); ray_file_close(lock_fd); }
             return err;
         }
     }
 
     dom_flush_index(dom, count, written_size);
-    ray_file_unlock(lock_fd);
-    ray_file_close(lock_fd);
+    if (!lock_held) { ray_file_unlock(lock_fd); ray_file_close(lock_fd); }
     return RAY_OK;
 
 fail_tmp:
     dom_ck_free(&tail);
     remove(tmp_path);
-    ray_file_unlock(lock_fd);
-    ray_file_close(lock_fd);
+    if (!lock_held) { ray_file_unlock(lock_fd); ray_file_close(lock_fd); }
     return err;
 }
 
@@ -2860,6 +2856,14 @@ static bool dom_fseek(FILE* f, int64_t off) {
 #else
     return fseeko(f, (off_t)off, SEEK_SET) == 0;
 #endif
+}
+
+ray_err_t ray_sym_domain_flush(ray_sym_domain_t* dom, bool durable) {
+    return dom_flush(dom, durable, false);
+}
+
+ray_err_t ray_sym_domain_flush_locked(ray_sym_domain_t* dom, bool durable) {
+    return dom_flush(dom, durable, true);
 }
 
 ray_err_t ray_sym_domain_flush_append(ray_sym_domain_t* dom, bool durable) {

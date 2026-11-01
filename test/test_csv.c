@@ -2547,11 +2547,95 @@ static test_result_t test_csv_splayed_crash_symfile(void) {
 #endif
 }
 
+static bool csv_order_fields_match(ray_t* t, bool old) {
+    const char* old_sym[] = {"alpha", "beta", "alpha"};
+    const char* old_txt[] = {"one long string", "two long string", "three long string"};
+    const char* new_sym[] = {"gamma", "delta"};
+    const char* new_txt[] = {"four long string", "five long string"};
+    int64_t old_id[] = {11, 22, 33}, new_id[] = {44, 55};
+    int n = old ? 3 : 2;
+    if (!t || RAY_IS_ERR(t) || ray_table_nrows(t) != n) return false;
+    ray_t* sym = ray_table_get_col_idx(t, 0);
+    ray_t* id = ray_table_get_col_idx(t, 1);
+    ray_t* str = ray_table_get_col_idx(t, 2);
+    if (!sym || !id || !str || sym->type != RAY_SYM || id->type != RAY_I64 || str->type != RAY_STR)
+        return false;
+    for (int i = 0; i < n; i++) {
+        ray_t* atom = ray_sym_vec_cell(sym, i);
+        const char* expected_sym = old ? old_sym[i] : new_sym[i];
+        const char* expected_str = old ? old_txt[i] : new_txt[i];
+        size_t len = 0; const char* text = ray_str_vec_get(str, i, &len);
+        if (!atom || strcmp(ray_str_ptr(atom), expected_sym) ||
+            ((int64_t*)ray_data(id))[i] != (old ? old_id[i] : new_id[i]) ||
+            !text || len != strlen(expected_str) || memcmp(text, expected_str, len)) return false;
+    }
+    return true;
+}
+
+/* Each stop is reached only after its durable operation returns.  In the
+ * two post-rename cases the current generation is new; the old generation
+ * is checked by its retained generation path before any pruning runs. */
+static test_result_t test_csv_splayed_crash_order(void) {
+#if !defined(DEBUG) || defined(RAY_OS_WINDOWS)
+    SKIP("requires POSIX debug stop injection");
+#else
+    static const char* steps[] = {"stop_after_chain", "stop_after_sym",
+        "stop_after_columns", "stop_after_schema", "stop_after_stage_dirs",
+        "stop_after_manifest_sync", "stop_after_publish", "stop_after_publish_dir"};
+    ray_heap_init(); (void)ray_sym_init();
+    char root[128], dir[160], sym[160], manifest[192], olddir[384];
+    snprintf(root, sizeof(root), "%s", ray_test_tmp("/tmp/rayforce-csv-order"));
+    snprintf(dir, sizeof(dir), "%s/table", root);
+    snprintf(sym, sizeof(sym), "%s/shared.sym", root);
+    snprintf(manifest, sizeof(manifest), "%s/.current", dir);
+    int8_t types[] = {RAY_SYM, RAY_I64, RAY_STR};
+    for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
+        csv_test_rm_rf(root);
+        TEST_ASSERT_EQ_I(mkdir(root, 0700), 0);
+        FILE* f = fopen(TMP_CSV, "w"); TEST_ASSERT_NOT_NULL(f);
+        fputs("s,id,text\nalpha,11,one long string\nbeta,22,two long string\nalpha,33,three long string\n", f); fclose(f);
+        for (int seed = 0; seed < 2; seed++)
+            TEST_ASSERT_EQ_I(ray_csv_save_splayed_shared(TMP_CSV, ',', true, types, 3, NULL, 0,
+                             dir, 100000, RAY_COMPRESS_ABSENT, sym, true), RAY_OK);
+        f = fopen(manifest, "r"); TEST_ASSERT_NOT_NULL(f);
+        char gen[192]; TEST_ASSERT_NOT_NULL(fgets(gen, sizeof(gen), f)); fclose(f);
+        gen[strcspn(gen, "\r\n")] = 0;
+        snprintf(olddir, sizeof(olddir), "%s/%s", dir, gen);
+        f = fopen(TMP_CSV, "w"); TEST_ASSERT_NOT_NULL(f);
+        fputs("s,id,text\ngamma,44,four long string\ndelta,55,five long string\n", f); fclose(f);
+        pid_t child = fork(); TEST_ASSERT_TRUE(child >= 0);
+        if (child == 0) {
+            setenv("RAY_CSV_SPLAYED_INJECT", steps[i], 1);
+            ray_err_t err = ray_csv_save_splayed_shared(TMP_CSV, ',', true, types, 3, NULL, 0,
+                            dir, 100000, RAY_COMPRESS_ABSENT, sym, true);
+            _exit(err == RAY_OK ? 0 : 1);
+        }
+        int status = 0;
+        pid_t waited = waitpid(child, &status, WUNTRACED);
+        bool stopped = waited == child && WIFSTOPPED(status) && WSTOPSIG(status) == SIGSTOP;
+        if (stopped) { (void)kill(child, SIGKILL); (void)waitpid(child, &status, 0); }
+        TEST_ASSERT_TRUE(stopped);
+        TEST_ASSERT_TRUE(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+        ray_t* old = ray_read_splayed(olddir, sym);
+        TEST_ASSERT_TRUE(csv_order_fields_match(old, true)); ray_release(old);
+        ray_t* current = ray_read_splayed(dir, sym);
+        TEST_ASSERT_TRUE(current && !RAY_IS_ERR(current));
+        TEST_ASSERT_TRUE(csv_order_fields_match(current, i < 6));
+        ray_release(current);
+        TEST_ASSERT_EQ_I(ray_csv_save_splayed_shared(TMP_CSV, ',', true, types, 3, NULL, 0,
+                         dir, 100000, RAY_COMPRESS_ABSENT, sym, true), RAY_OK);
+    }
+    csv_test_rm_rf(root); unlink(TMP_CSV); ray_sym_destroy(); ray_heap_destroy();
+    PASS();
+#endif
+}
+
 const test_entry_t csv_entries[] = {
     { "csv/splayed_cancel", test_csv_splayed_cancel, NULL, NULL },
     { "csv/splayed_cancel_hash", test_csv_splayed_cancel_hash, NULL, NULL },
     { "csv/splayed_cancel_symfile", test_csv_splayed_cancel_symfile, NULL, NULL },
     { "csv/splayed_crash_symfile", test_csv_splayed_crash_symfile, NULL, NULL },
+    { "csv/splayed_crash_order", test_csv_splayed_crash_order, NULL, NULL },
     { "csv/splayed_sentinel_literal", test_csv_splayed_sentinel_literal, NULL, NULL },
     { "csv/parted_staging", test_csv_parted_staging, NULL, NULL },
     { "csv/parted_zones", test_csv_parted_zones, NULL, NULL },

@@ -48,6 +48,9 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifndef RAY_OS_WINDOWS
+#include <signal.h>
+#endif
 #include <time.h>
 #include <stdatomic.h>
 
@@ -258,6 +261,16 @@ ray_err_t ray_splay_resolve_dir(const char* dir, char* out, size_t out_sz) {
     return n < 0 || (size_t)n >= out_sz ? RAY_ERR_RANGE : RAY_OK;
 }
 
+/* Debug-only stop points for the CSV crash-order process test. */
+static void splay_csv_stop_after(const char* step) {
+#if defined(DEBUG) && !defined(RAY_OS_WINDOWS)
+    const char* e = getenv("RAY_CSV_SPLAYED_INJECT");
+    if (e && strcmp(e, step) == 0) raise(SIGSTOP);
+#else
+    (void)step;
+#endif
+}
+
 static ray_err_t splay_publish_generation(const char* dir, const char* gen,
                                           bool durable) {
     char manifest[1024], tmp[1024];
@@ -285,11 +298,15 @@ static ray_err_t splay_publish_generation(const char* dir, const char* gen,
     }
     ray_err_t err = durable ? ray_file_sync(fd) : RAY_OK;
     ray_file_close(fd);
+    if (err == RAY_OK && durable) splay_csv_stop_after("stop_after_manifest_sync");
     if (err != RAY_OK || ray_file_rename(tmp, manifest) != RAY_OK) {
         (void)remove(tmp);
         return RAY_ERR_IO;
     }
-    return durable ? ray_file_sync_dir(manifest) : RAY_OK;
+    if (durable) splay_csv_stop_after("stop_after_publish");
+    err = durable ? ray_file_sync_dir(manifest) : RAY_OK;
+    if (err == RAY_OK && durable) splay_csv_stop_after("stop_after_publish_dir");
+    return err;
 }
 
 static ray_err_t splay_has_file(const char* dir, const char* name, bool* exists) {
@@ -977,6 +994,7 @@ ray_err_t ray_splay_write_finish(ray_splay_write_t* write, ray_err_t result,
         if (durable && (ray_file_sync_dir(schema) != RAY_OK ||
                         ray_file_sync_dir(write->dir) != RAY_OK))
             result = RAY_ERR_IO;
+        if (result == RAY_OK && durable) splay_csv_stop_after("stop_after_stage_dirs");
         if (result == RAY_OK)
             result = splay_publish_generation(write->root, write->generation, durable);
         if (result == RAY_OK) {

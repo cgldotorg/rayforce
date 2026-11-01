@@ -3547,6 +3547,14 @@ static bool csv_splayed_inject(const char* step) {
 #endif
 }
 
+static void csv_stop_after(const char* step) {
+#if defined(DEBUG) && !defined(RAY_OS_WINDOWS)
+    if (csv_splayed_inject(step)) raise(SIGSTOP);
+#else
+    (void)step;
+#endif
+}
+
 /* Append task: column `start` of the chunk table into its writer.  The
  * first failure is kept (a later task cannot clear it); `done` counts the
  * columns appended, so a task a cancel skipped reads as not done. */
@@ -3589,7 +3597,7 @@ static ray_err_t csv_save_splayed_to_dir(const char* path, char delimiter, bool 
                                           const int64_t* col_names_in, int32_t n_names,
                                           const char* dir, int64_t rows_per_chunk,
                                           const char* sym_path, ray_compress_t mode,
-                                          const char* cur, ray_err_t cur_err, bool durable) {
+                                          const char* cur, ray_err_t cur_err, bool durable, bool sym_locked) {
     if (ray_interrupted()) return RAY_ERR_CANCEL;
     if (!path || !dir || !sym_path) return RAY_ERR_DOMAIN;
     if (rows_per_chunk <= 0) rows_per_chunk = CSV_PART_ROWS_DEFAULT;
@@ -3907,7 +3915,8 @@ static ray_err_t csv_save_splayed_to_dir(const char* path, char delimiter, bool 
         }
     }
     if (err == RAY_OK && sym_dom) {
-        err = ray_sym_domain_flush(sym_dom, durable);
+        err = sym_locked ? ray_sym_domain_flush_locked(sym_dom, durable)
+                         : ray_sym_domain_flush(sym_dom, durable);
         if (err == RAY_OK && durable) {
             ray_fd_t fd = ray_file_open(sym_path, RAY_OPEN_READ | RAY_OPEN_WRITE);
             if (fd == RAY_FD_INVALID) err = RAY_ERR_IO;
@@ -3918,9 +3927,7 @@ static ray_err_t csv_save_splayed_to_dir(const char* path, char delimiter, bool 
             }
         }
     }
-#if defined(DEBUG) && !defined(RAY_OS_WINDOWS)
-    if (err == RAY_OK && csv_splayed_inject("stop_after_sym")) raise(SIGSTOP);
-#endif
+    if (err == RAY_OK && durable) csv_stop_after("stop_after_sym");
     int64_t tr_flush_end = ray_profile_now_ns();
     if (trace) fprintf(stderr, "csv.splayed: symfile_flush=%.1fms\n", TR_MS(tr_flush_end - tr_loop_end));
 
@@ -3931,6 +3938,7 @@ static ray_err_t csv_save_splayed_to_dir(const char* path, char delimiter, bool 
     if (err == RAY_OK && csv_splayed_inject("close")) ray_request_interrupt();
     if (err == RAY_OK) err = ray_col_stream_close_all(writers, ncols, durable, trace ? tr_col_ns : NULL);
     else for (int c = 0; c < ncols; c++) ray_col_stream_abort(&writers[c]);
+    if (err == RAY_OK && durable) csv_stop_after("stop_after_columns");
     int64_t tr_close_end = ray_profile_now_ns();
     if (trace) {
         int64_t mx = 0; int mxc = -1;
@@ -3979,6 +3987,7 @@ static ray_err_t csv_save_splayed_to_dir(const char* path, char delimiter, bool 
             ray_release(schema);
         }
     }
+    if (err == RAY_OK && durable) csv_stop_after("stop_after_schema");
     if (trace) fprintf(stderr, "csv.splayed: schema=%.1fms total=%.1fms\n",
                        TR_MS(ray_profile_now_ns() - tr_rel_end), TR_MS(ray_profile_now_ns() - tr_t0));
 #undef TR_MS
@@ -4082,10 +4091,34 @@ ray_err_t ray_csv_save_splayed_shared(const char* path, char delimiter, bool hea
     if (durable) {
         err = csv_sync_parent_chain(write.root);
         if (err != RAY_OK) return ray_splay_write_finish(&write, err, false);
+        csv_stop_after("stop_after_chain");
+    }
+    /* Hold the domain's existing writer lock from before its snapshot is
+     * opened until its symbol positions are persisted.  Locking only the
+     * flush allows two imports to assign different meanings to the same id. */
+    ray_fd_t sym_lock = RAY_FD_INVALID;
+    if (shared_sym_path) {
+        char lock_path[1024];
+        n = snprintf(lock_path, sizeof(lock_path), "%s.lk", sym_path);
+        if (n < 0 || (size_t)n >= sizeof(lock_path))
+            return ray_splay_write_finish(&write, RAY_ERR_RANGE, false);
+        sym_lock = ray_file_open(lock_path, RAY_OPEN_READ | RAY_OPEN_WRITE | RAY_OPEN_CREATE);
+        if (sym_lock == RAY_FD_INVALID)
+            return ray_splay_write_finish(&write, RAY_ERR_IO, false);
+        err = ray_file_lock_ex(sym_lock);
+        if (err != RAY_OK) {
+            ray_file_close(sym_lock);
+            return ray_splay_write_finish(&write, err, false);
+        }
     }
     err = csv_save_splayed_to_dir(path, delimiter, header, col_types_in, n_types,
                                   col_names_in, n_names, write.dir,
-                                  rows_per_chunk, sym_path, mode, write.cur, write.cur_err, durable);
+                                  rows_per_chunk, sym_path, mode, write.cur, write.cur_err, durable,
+                                  sym_lock != RAY_FD_INVALID);
+    if (sym_lock != RAY_FD_INVALID) {
+        (void)ray_file_unlock(sym_lock);
+        ray_file_close(sym_lock);
+    }
     return ray_splay_write_finish(&write, err, durable);
 }
 
