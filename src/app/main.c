@@ -31,6 +31,7 @@
 #include "app/repl.h"
 #include "core/runtime.h"
 #include "store/journal.h"
+#include "store/appendcap.h"
 #include "ops/internal.h"
 #include "ops/idxop.h"
 #include "mem/heap.h"
@@ -135,6 +136,8 @@ int main(int argc, char** argv) {
     int rc = 0;
     int interactive = 0;
     const char* file = NULL;
+    const char* append_root = NULL;
+    const char* append_date = NULL;
     uint16_t port = 0;
     char bind_host[64] = "";   /* -p HOST:PORT bind address; empty = all interfaces */
     int n_cores = -1;      /* total execution cores; -1 = leave pool lazy */
@@ -229,6 +232,14 @@ int main(int argc, char** argv) {
             file = flag_value(argc, argv, &i, argv[i]);
             if (!file) { ray_runtime_destroy(rt); return 2; }
         }
+        else if (strcmp(argv[i], "--append-root") == 0) {
+            append_root = flag_value(argc, argv, &i, argv[i]);
+            if (!append_root) { ray_runtime_destroy(rt); return 2; }
+        }
+        else if (strcmp(argv[i], "--append-date") == 0) {
+            append_date = flag_value(argc, argv, &i, argv[i]);
+            if (!append_date) { ray_runtime_destroy(rt); return 2; }
+        }
         else if (strcmp(argv[i], "-u") == 0 || strcmp(argv[i], "-U") == 0) {
             auth_restricted = (argv[i][1] == 'U');
             auth_pw = flag_value(argc, argv, &i, argv[i]);
@@ -264,6 +275,8 @@ int main(int argc, char** argv) {
                 "  -i, --interactive   start the REPL even after running a file\n"
                 "  -u PW               set plain auth password\n"
                 "  -U PW               set restricted auth password\n"
+                "  --append-root ROOT  enable the quotes_1m append capability under ROOT\n"
+                "  --append-date DATE  fixed authorized date, YYYY.MM.DD (requires --port)\n"
                 "  -l BASE             enable journal logging (BASE.log + BASE.qdb)\n"
                 "  -L BASE             enable journal logging with fsync per write\n"
                 "  -m, --mem SIZE      RAM budget (e.g. 4G, 512M); allocations past it\n"
@@ -302,6 +315,11 @@ int main(int argc, char** argv) {
         }
         else
             file = argv[i];
+    }
+
+    if ((append_root || append_date) && (!append_root || !append_date || !port)) {
+        fprintf(stderr, "append capability requires root, date and server port\n");
+        ray_runtime_destroy(rt); return 2;
     }
 
     /* Expose the full command line to Rayfall via (.sys.args). */
@@ -413,6 +431,12 @@ int main(int argc, char** argv) {
             if (poll) ray_poll_drain_timers(poll);
             goto done;
         }
+    }
+
+    /* Configure after the trusted script and before serving any requests. */
+    if (append_root && ray_append_cap_configure(append_root, append_date) != RAY_OK) {
+        fprintf(stderr, "append capability configuration refused\n");
+        rc = 2; goto done;
     }
 
     /* REPL or pure server mode.

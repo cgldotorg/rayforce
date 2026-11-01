@@ -43,6 +43,7 @@
 #include "store/serde.h"   /* ray_serde_size — result footprint for spans */
 #include "table/sym.h"
 #include "store/col.h"    /* ray_col_want_rows — gather read-ahead */
+#include "store/appendcap.h"
 #include "mem/heap.h"
 #include "core/pool.h"
 #include "mem/sys.h"
@@ -4689,6 +4690,7 @@ static void ray_register_builtins(void) {
     register_vary(".db.splayed.set",   RAY_FN_RESTRICTED, ray_set_splayed_fn);
     register_vary(".db.splayed.append_proto", RAY_FN_RESTRICTED, ray_proto_reflink_append_fn);
     register_vary(".db.splayed.append", RAY_FN_RESTRICTED, ray_splayed_append_fn);
+    register_vary(".db.append_today", RAY_FN_NONE, ray_append_today_fn);
     register_vary(".db.splayed.get",   RAY_FN_NONE,       ray_get_splayed_fn);
     register_vary(".db.parted.get",    RAY_FN_NONE,       ray_get_parted_fn);
     register_vary(".db.parted.tables", RAY_FN_NONE,       ray_get_parted_tables_fn);
@@ -4953,6 +4955,7 @@ ray_err_t ray_lang_init(void) {
 }
 
 void ray_lang_destroy(void) {
+    ray_append_cap_reset();
     if (__VM && __VM->raise_val) { ray_release(__VM->raise_val); __VM->raise_val = NULL; }
     closure_tmpl_reset();
     /* Reset global Datalog rule storage */
