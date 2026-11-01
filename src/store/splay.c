@@ -495,6 +495,104 @@ static void splay_prune_generations(const char* root, const char* current) {
     closedir(d);
 }
 
+/* Generation names contain wall-clock seconds and PIDs, so their lexical or
+ * timestamp order is not a reliable publication order. Record the selected
+ * predecessor under the table writer lock before publishing the new manifest. */
+static bool splay_valid_generation_rel(const char* rel) {
+    if (strncmp(rel, ".generations/", 13) != 0 || !rel[13]) return false;
+    for (const char* p = rel + 13; *p; p++)
+        if (!((*p >= '0' && *p <= '9') || *p == 'g' || *p == '-')) return false;
+    return true;
+}
+
+static ray_err_t splay_write_previous(ray_splay_write_t* write, bool durable) {
+    const char* previous = "";
+    size_t root_len = strlen(write->root);
+    if (strncmp(write->cur, write->root, root_len) == 0 && write->cur[root_len] == '/') {
+        previous = write->cur + root_len + 1;
+        if (!splay_valid_generation_rel(previous)) return RAY_ERR_CORRUPT;
+    } else if (strcmp(write->cur, write->root) != 0) {
+        return RAY_ERR_CORRUPT;
+    }
+    char path[1100];
+    int n = snprintf(path, sizeof path, "%s/.previous", write->dir);
+    if (n < 0 || (size_t)n >= sizeof path) return RAY_ERR_RANGE;
+    FILE* f = fopen(path, "wb");
+    if (!f) return RAY_ERR_IO;
+    size_t len = strlen(previous);
+    bool ok = fwrite(previous, 1, len, f) == len && fputc('\n', f) != EOF;
+    if (ok && fflush(f) != 0) ok = false;
+    if (fclose(f) != 0) ok = false;
+    if (!ok) return RAY_ERR_IO;
+    if (!durable) return RAY_OK;
+    ray_fd_t fd = ray_file_open(path, RAY_OPEN_READ | RAY_OPEN_WRITE);
+    if (fd == RAY_FD_INVALID) return RAY_ERR_IO;
+    ray_err_t err = ray_file_sync(fd);
+    ray_file_close(fd);
+    return err;
+}
+
+/* Prune only after a successful durable publish, under the existing table
+ * writer lock. If the predecessor chain is missing, malformed, or too short
+ * (e.g. an older untracked generation), retain everything until N linked
+ * publications exist. A failed cleanup is best effort and retried later. */
+static void splay_prune_retained(const char* root, const char* current, unsigned retain) {
+    if (!retain || retain > 1024 || !splay_valid_generation_rel(current)) return;
+    char (*keep)[256] = calloc(retain, sizeof *keep);
+    if (!keep) return;
+    snprintf(keep[0], sizeof keep[0], "%s", current);
+    unsigned count = 1;
+    while (count < retain) {
+        char path[1100], previous[256];
+        int n = snprintf(path, sizeof path, "%s/%s/.previous", root, keep[count - 1]);
+        if (n < 0 || (size_t)n >= sizeof path) break;
+        FILE* f = fopen(path, "rb");
+        if (!f) break;
+        size_t len = fread(previous, 1, sizeof previous, f);
+        bool bad = ferror(f) || len == sizeof previous;
+        if (fclose(f) != 0) bad = true;
+        if (bad || !len) break;
+        if (previous[len - 1] == '\n') len--;
+        previous[len] = '\0';
+        if (!splay_valid_generation_rel(previous)) break;
+        char previous_dir[1100];
+        n = snprintf(previous_dir, sizeof previous_dir, "%s/%s", root, previous);
+        struct stat st;
+        if (n < 0 || (size_t)n >= sizeof previous_dir) break;
+#ifdef RAY_OS_WINDOWS
+        if (stat(previous_dir, &st) != 0 || !S_ISDIR(st.st_mode)) break;
+#else
+        if (lstat(previous_dir, &st) != 0 || !S_ISDIR(st.st_mode)) break;
+#endif
+        bool cycle = false;
+        for (unsigned i = 0; i < count; i++)
+            if (strcmp(keep[i], previous) == 0) cycle = true;
+        if (cycle) break;
+        snprintf(keep[count++], sizeof keep[0], "%s", previous);
+    }
+    if (count == retain) {
+        char generations[1024];
+        int n = snprintf(generations, sizeof generations, "%s/.generations", root);
+        DIR* d = n < 0 || (size_t)n >= sizeof generations ? NULL : opendir(generations);
+        if (d) {
+            struct dirent* entry;
+            while ((entry = readdir(d))) {
+                if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+                char rel[256], full[1100];
+                int a = snprintf(rel, sizeof rel, ".generations/%s", entry->d_name);
+                int b = snprintf(full, sizeof full, "%s/%s", root, rel);
+                if (a < 0 || (size_t)a >= sizeof rel || b < 0 || (size_t)b >= sizeof full) continue;
+                bool saved = false;
+                for (unsigned i = 0; i < count; i++) if (strcmp(keep[i], rel) == 0) saved = true;
+                if (!saved) splay_remove_tree_best_effort(full);
+            }
+            closedir(d);
+            splay_retire_legacy_schema(root);
+        }
+    }
+    free(keep);
+}
+
 static ray_err_t splay_validate_save(ray_t* tbl, const char* dir,
                                      const char* sym_path) {
     if (!tbl || RAY_IS_ERR(tbl) || tbl->type != RAY_TABLE) return RAY_ERR_TYPE;
@@ -1015,7 +1113,9 @@ ray_err_t ray_splay_write_finish(ray_splay_write_t* write, ray_err_t result,
         /* ray_file_sync_dir syncs the PARENT of its argument. */
         char schema[1100];
         snprintf(schema, sizeof(schema), "%s/.d", write->dir);
-        if (durable) {
+        if (write->append && write->retain_generations)
+            result = splay_write_previous(write, durable);
+        if (result == RAY_OK && durable) {
             result = ray_file_sync_dir(schema);
             if (result == RAY_OK && write->append) result = append_checkpoint("generation");
             if (result == RAY_OK) result = ray_file_sync_dir(write->dir);
@@ -1028,6 +1128,8 @@ ray_err_t ray_splay_write_finish(ray_splay_write_t* write, ray_err_t result,
             splay_retire_legacy_schema(write->root);
             splay_prune_generations(write->root, write->generation);
         }
+        if (result == RAY_OK && write->append && write->retain_generations)
+            splay_prune_retained(write->root, write->generation, write->retain_generations);
     }
     if (result != RAY_OK && write->staged && write->dir[0] &&
         !splay_generation_is_current(write)) {
@@ -1836,9 +1938,9 @@ static ray_err_t splay_sym_clone_append(const char* src, const char* dst,
 }
 #endif
 
-static ray_t* splay_reflink_append(ray_t** args, int64_t n, bool product) {
+static ray_t* splay_reflink_append(ray_t** args, int64_t n, bool product, unsigned retain) {
 #ifndef RAY_OS_LINUX
-    (void)args; (void)n; (void)product;
+    (void)args; (void)n; (void)product; (void)retain;
     return ray_error("nyi", "append prototype requires Linux FICLONE");
 #else
     if (n != (product ? 3 : 2)) return ray_error("arity", "append requires path, table and shared sym path");
@@ -1859,6 +1961,7 @@ static ray_t* splay_reflink_append(ray_t** args, int64_t n, bool product) {
     ray_err_t err = ray_splay_write_begin(root, &w);
     if (err != RAY_OK) return ray_error(ray_err_code_str(err), NULL);
     w.append = product;
+    w.retain_generations = product ? retain : 0;
     if (!w.staged || w.cur_err != RAY_OK) err = RAY_ERR_DOMAIN;
     ray_fd_t sym_lock = RAY_FD_INVALID;
     ray_sym_domain_t* dom = NULL;
@@ -2064,9 +2167,13 @@ static ray_t* splay_reflink_append(ray_t** args, int64_t n, bool product) {
 }
 
 ray_t* ray_proto_reflink_append_fn(ray_t** args, int64_t n) {
-    return splay_reflink_append(args, n, false);
+    return splay_reflink_append(args, n, false, 0);
 }
 
 ray_t* ray_splayed_append_fn(ray_t** args, int64_t n) {
-    return splay_reflink_append(args, n, true);
+    return splay_reflink_append(args, n, true, 0);
+}
+
+ray_t* ray_splayed_append_retained(ray_t** args, int64_t n, unsigned retain) {
+    return splay_reflink_append(args, n, true, retain);
 }

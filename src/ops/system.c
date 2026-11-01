@@ -1797,6 +1797,9 @@ ray_t* ray_build_sys_args(int argc, char** argv) {
             log = argv[++i];
         else if ((strcmp(argv[i], "-m") == 0 || strcmp(argv[i], "--mem") == 0) && i + 1 < argc)
             i++;   /* RAM budget is configured by the launcher, not exposed here */
+        else if ((strcmp(argv[i], "--append-root") == 0 || strcmp(argv[i], "--append-date") == 0 ||
+                  strcmp(argv[i], "--append-retain") == 0) && i + 1 < argc)
+            i++;   /* launch-bound capability is configured by the launcher */
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) { /* ignore */ }
         else file = argv[i];
     }

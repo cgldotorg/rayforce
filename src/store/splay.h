@@ -39,7 +39,8 @@ typedef struct {
     bool locked;
     bool unlink_lock;       /* lock failed with nobody holding it: remove the file */
     bool staged;
-    bool append;           /* preserve prior generations; append-specific fault checkpoints */
+    bool append;           /* append-specific fault checkpoints */
+    unsigned retain_generations; /* append only: 0 preserves every generation */
     bool published;        /* manifest rename succeeded, even if final directory sync fails */
     uint64_t* before;       /* in-place: inodes in root when the lock was taken */
     size_t nbefore;
@@ -66,6 +67,9 @@ ray_err_t ray_splay_write_begin_mode(const char* dir, ray_compress_t mode,
                                      ray_splay_write_t* write);
 ray_err_t ray_splay_write_finish(ray_splay_write_t* write, ray_err_t result,
                                   bool durable);
+/* Privileged launch-bound append: retain current plus its N-1 predecessors.
+ * Zero preserves all generations, as the unrestricted product append does. */
+ray_t* ray_splayed_append_retained(ray_t** args, int64_t n, unsigned retain);
 /* Write only to a fresh/unpublished directory owned by the caller. */
 ray_err_t ray_splay_write_table(ray_t* tbl, const char* dir,
                                  const char* sym_path, bool durable);

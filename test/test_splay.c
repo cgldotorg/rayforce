@@ -2498,6 +2498,98 @@ static int generation_dir_count(const char* dir) {
     return count;
 }
 
+#if defined(RAY_OS_LINUX)
+/* Exercise the append retention publication protocol without depending on
+ * FICLONE availability on the test runner's temporary filesystem. */
+static ray_err_t retained_generation_write(const char* dir, int64_t value, unsigned keep) {
+    ray_splay_write_t w;
+    ray_err_t err = ray_splay_write_begin(dir, &w);
+    if (err != RAY_OK) return err;
+    w.append = true;
+    w.retain_generations = keep;
+    ray_t* table = generation_pair(value);
+    if (!table || RAY_IS_ERR(table)) return ray_splay_write_finish(&w, RAY_ERR_OOM, true);
+    err = ray_splay_write_table_ctx(table, &w, NULL, true);
+    ray_release(table);
+    return ray_splay_write_finish(&w, err, true);
+}
+
+static test_result_t test_generation_append_retention(void) {
+    const char* dir = ray_test_tmp(TMP_SPLAY_BASE "/append_retention");
+    rm_rf(dir);
+    ray_t* first = generation_pair(1);
+    TEST_ASSERT_EQ_I(ray_splay_save(first, dir, NULL), RAY_OK);
+    ray_release(first);
+    TEST_ASSERT_EQ_I(retained_generation_write(dir, 2, 3), RAY_OK);
+    char original[1024];
+    TEST_ASSERT_EQ_I(ray_splay_resolve_dir(dir, original, sizeof original), RAY_OK);
+    ray_t* held = ray_read_splayed(dir, NULL);
+    TEST_ASSERT_TRUE(held && !RAY_IS_ERR(held));
+    for (int i = 3; i <= 7; i++) {
+        TEST_ASSERT_EQ_I(retained_generation_write(dir, i, 3), RAY_OK);
+        TEST_ASSERT_TRUE(generation_dir_count(dir) <= 3);
+        TEST_ASSERT_TRUE(generation_matches(dir, true, i));
+    }
+    /* The old generation directory has gone, but an already mapped reader
+     * remains stable; a new load resolves the current complete generation. */
+    TEST_ASSERT_EQ_I(access(original, F_OK), -1);
+    ray_t* col = ray_table_get_col(held, ray_sym_intern("x", 1));
+    TEST_ASSERT_TRUE(col && col->len == 2 && ((int64_t*)ray_data(col))[0] == 2);
+    TEST_ASSERT_TRUE(generation_matches(dir, true, 7));
+    TEST_ASSERT_EQ_I(generation_dir_count(dir), 3);
+    ray_release(held);
+    rm_rf(dir);
+    PASS();
+}
+
+static test_result_t test_generation_append_retention_increase(void) {
+    const char* dir = ray_test_tmp(TMP_SPLAY_BASE "/append_retention_increase");
+    rm_rf(dir);
+    ray_t* first = generation_pair(1);
+    TEST_ASSERT_EQ_I(ray_splay_save(first, dir, NULL), RAY_OK);
+    ray_release(first);
+    for (int i = 2; i <= 6; i++) TEST_ASSERT_EQ_I(retained_generation_write(dir, i, 2), RAY_OK);
+    TEST_ASSERT_EQ_I(generation_dir_count(dir), 2);
+    /* A predecessor already pruned under N=2 must not count towards N=4. */
+    TEST_ASSERT_EQ_I(retained_generation_write(dir, 7, 4), RAY_OK);
+    TEST_ASSERT_EQ_I(generation_dir_count(dir), 3);
+    TEST_ASSERT_EQ_I(retained_generation_write(dir, 8, 4), RAY_OK);
+    TEST_ASSERT_EQ_I(generation_dir_count(dir), 4);
+    TEST_ASSERT_EQ_I(retained_generation_write(dir, 9, 4), RAY_OK);
+    TEST_ASSERT_EQ_I(generation_dir_count(dir), 4);
+    TEST_ASSERT_TRUE(generation_matches(dir, true, 9));
+    rm_rf(dir);
+    PASS();
+}
+
+#if defined(DEBUG)
+static test_result_t test_generation_append_retention_commit_failure(void) {
+    const char* dir = ray_test_tmp(TMP_SPLAY_BASE "/append_retention_failure");
+    rm_rf(dir);
+    ray_t* first = generation_pair(1);
+    TEST_ASSERT_EQ_I(ray_splay_save(first, dir, NULL), RAY_OK);
+    ray_release(first);
+    for (int i = 2; i <= 4; i++) TEST_ASSERT_EQ_I(retained_generation_write(dir, i, 3), RAY_OK);
+    TEST_ASSERT_EQ_I(generation_dir_count(dir), 3);
+    TEST_ASSERT_EQ_I(setenv("RAY_APPEND_FAIL", "manifest", 1), 0);
+    TEST_ASSERT_TRUE(retained_generation_write(dir, 5, 3) != RAY_OK);
+    TEST_ASSERT_EQ_I(unsetenv("RAY_APPEND_FAIL"), 0);
+    TEST_ASSERT_EQ_I(generation_dir_count(dir), 3);
+    TEST_ASSERT_TRUE(generation_matches(dir, true, 4));
+    TEST_ASSERT_EQ_I(setenv("RAY_APPEND_FAIL", "publish", 1), 0);
+    TEST_ASSERT_TRUE(retained_generation_write(dir, 5, 3) != RAY_OK);
+    TEST_ASSERT_EQ_I(unsetenv("RAY_APPEND_FAIL"), 0);
+    TEST_ASSERT_EQ_I(generation_dir_count(dir), 4); /* no prune on uncertain commit */
+    TEST_ASSERT_TRUE(generation_matches(dir, true, 5));
+    TEST_ASSERT_EQ_I(retained_generation_write(dir, 6, 3), RAY_OK);
+    TEST_ASSERT_EQ_I(generation_dir_count(dir), 3);
+    TEST_ASSERT_TRUE(generation_matches(dir, true, 6));
+    rm_rf(dir);
+    PASS();
+}
+#endif
+#endif
+
 #ifndef _WIN32
 /* A failed first write clears what it created in the table directory, but
  * only unlinks a link found there, never what the link points to. */
@@ -3457,6 +3549,13 @@ static test_result_t test_per_column_symfiles(void) {
 }
 
 const test_entry_t splay_entries[] = {
+#if defined(RAY_OS_LINUX)
+    { "splay/generation_append_retention", test_generation_append_retention, splay_setup, splay_teardown },
+    { "splay/generation_append_retention_increase", test_generation_append_retention_increase, splay_setup, splay_teardown },
+#if defined(DEBUG)
+    { "splay/generation_append_retention_commit_failure", test_generation_append_retention_commit_failure, splay_setup, splay_teardown },
+#endif
+#endif
 #ifndef _WIN32
     { "splay/generation_prune_unlinks_symlink", test_generation_prune_unlinks_symlink, splay_setup, splay_teardown },
     { "splay/generation_prune_unlinks_symlink_entry", test_generation_prune_unlinks_symlink_entry, splay_setup, splay_teardown },

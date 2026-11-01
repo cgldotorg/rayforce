@@ -42,7 +42,7 @@
 (type .db) -- 'DICT
 (type .db.splayed) -- 'DICT
 (type .db.parted) -- 'DICT
-(count .db) -- 2          ;; splayed, parted
+(count .db) -- 3          ;; splayed, parted, append_today
 (count .db.splayed) -- 4  ;; set, get, append_proto, append
 (count .db.parted) -- 4   ;; get, tables, fill, drop
 (nil? (resolve '.db.splayed.set))    -- false
