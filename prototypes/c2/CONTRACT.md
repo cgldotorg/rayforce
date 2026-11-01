@@ -8,6 +8,21 @@ ts_event, bid_px, ask_px, bid_sz, ask_sz, raw_symbol, parent. This contract
 uses those nine, in that order, with I64, TIMESTAMP, TIMESTAMP, I64, I64,
 I64, I64, STR, SYM types. Root `.sym` is shared by all partitions.
 
+Implementation decisions fixed before completing the inherited C draft:
+numeric/timestamp columns use reflinks; STR and SYM are streamed into new files,
+with bounded buffers and no full materialized concatenation. SYM output is W32
+at every append, so width transitions are handled by translating every old and
+new cell; domain counts beyond UINT32_MAX are rejected. STR pool offsets are
+rebased by the existing bounded column-stream writer, which rejects overflow.
+All schema/storage checks precede symbol interning. All old generation paths
+are retained by append (ordinary rewrite retains its existing pruning policy).
+An error after manifest rename answers the distinct eight-byte-safe code
+`commit`: publication happened, acknowledgement durability is uncertain.
+Tests stop after ancestry, symfile, each individual column, schema, stage
+directory, generation parent, manifest sync, manifest rename and directory sync.
+The same checkpoints inject I/O failures. C8 performs the explicit remount
+before acknowledgement; C2 itself preserves immutable snapshot semantics.
+
 ## 1. Atomicity and visibility
 
 Append writes a new immutable physical generation while holding the target
