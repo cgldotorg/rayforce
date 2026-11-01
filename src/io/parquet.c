@@ -32,7 +32,10 @@
 #include "store/fileio.h"
 #include "lang/eval.h"
 #include "lang/internal.h"
+#include "lang/cal.h"        /* date_leap_year, MONTHDAYS */
 #include <limits.h>
+#include <errno.h>
+#include <dirent.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -307,6 +310,7 @@ struct ray_parquet {
     bool failed, emitted, borrowed, filter_nulls;
     uint8_t compress;     /* the import's compress option (ray_compress_t; 0 = absent) */
     bool symcol;          /* the import's symfile 'column option: a symbol file per column */
+    char date_partition[11]; /* optional YYYY.MM.DD date-root destination */
 };
 static bool pq_reserve(uint8_t** buf, size_t* cap, size_t n) {
     if (n > PQ_MAX_PAGE) return false;
@@ -1604,6 +1608,16 @@ static bool pq_safe_name(const char* s) {
     for (; *s; s++) if (*s == '/' || *s == '\\' || *s == ':') return false;
     return true;
 }
+static bool pq_date_name(const char* s, size_t n) {
+    if (!s || n != 10 || s[4] != '.' || s[7] != '.') return false;
+    for (int i = 0; i < 10; i++)
+        if (i != 4 && i != 7 && (s[i] < '0' || s[i] > '9')) return false;
+    int y = (s[0]-'0')*1000 + (s[1]-'0')*100 + (s[2]-'0')*10 + (s[3]-'0');
+    int m = (s[5]-'0')*10 + s[6]-'0', d = (s[8]-'0')*10 + s[9]-'0';
+    if (m < 1 || m > 12 || d < 1) return false;
+    int leap = date_leap_year(y);
+    return d <= (int)(MONTHDAYS[leap][m] - MONTHDAYS[leap][m-1]);
+}
 /* Import schemas are positional, like CSV schemas. Unannotated integer dates
  * and timestamps require explicit UNIX_* units rather than guessing epochs. */
 static ray_t* pq_import_types(ray_parquet_t* r, ray_t* types) {
@@ -1613,9 +1627,21 @@ static ray_t* pq_import_types(ray_parquet_t* r, ray_t* types) {
         if (!keys || keys->type != RAY_SYM) return pq_error("import option keys must be symbols");
         for (int64_t i = 0; i < keys->len; i++) {
             ray_t* key = ray_sym_vec_cell(keys,i); const char* k = key ? ray_str_ptr(key) : NULL;
-            if (!k || (strcmp(k,"types") && strcmp(k,"strict") && strcmp(k,"rows") && strcmp(k,"compress") && strcmp(k,"symfile"))) return pq_error("unknown import option");
+            if (!k || (strcmp(k,"types") && strcmp(k,"strict") && strcmp(k,"rows") && strcmp(k,"compress") && strcmp(k,"symfile") && strcmp(k,"partition"))) return pq_error("unknown import option");
         }
         ray_t* err = pq_strict_option(r,types);
+        ray_t* partition = pq_option(types,"partition");
+        if (partition && RAY_IS_ERR(partition)) {
+            if (!err) err = partition; else ray_error_free(partition);
+            partition = NULL;
+        }
+        if (!err && partition) {
+            if (partition->type != -RAY_STR ||
+                !pq_date_name(ray_str_ptr(partition),ray_str_len(partition)))
+                err = ray_error("domain","parquet: partition must be a YYYY.MM.DD date string");
+            else { memcpy(r->date_partition,ray_str_ptr(partition),10); r->date_partition[10] = 0; }
+        }
+        if (partition) ray_release(partition);
         ray_t* rows = pq_option(types,"rows");
         if (rows && RAY_IS_ERR(rows)) {          /* the lookup itself failed */
             if (!err) err = rows; else ray_error_free(rows);
@@ -1858,6 +1884,8 @@ static ray_t* pq_sync_partitions(ray_parquet_t* r, const char* root, const char*
     }
     return NULL;
 }
+static ray_t* pq_write_date(const char* path, const char* root, const char* table,
+                            ray_t* types, const char* date);
 ray_t* ray_parquet_parted_typed(const char* path, const char* root, const char* table, ray_t* types) {
 #ifdef RAY_FUZZING
     return ray_error("restricted","Parquet imports disabled under fuzzing");
@@ -1872,6 +1900,11 @@ ray_t* ray_parquet_parted_typed(const char* path, const char* root, const char* 
     ray_sym_domain_t* domain = NULL;
     err = pq_import_types(r,types);
     if (!err && r->symcol) err = ray_error("domain","parquet: symfile 'column is supported by .parquet.splayed only");
+    if (!err && r->date_partition[0]) {
+        char date[11]; memcpy(date,r->date_partition,sizeof date);
+        ray_parquet_close(r);
+        return pq_write_date(path,root,table,types,date);
+    }
     if (!err) err = pq_stage(r,root,staging,sizeof(staging),true);
     if (err) goto done;
     /* Global runtime interning is not worker-safe. Decode symbols straight
@@ -2972,7 +3005,7 @@ static int64_t pq_stage_bytes(const ray_col_stream_t* s, int64_t rows) {
     return rows*(int64_t)(s->type == RAY_SYM ? 4 : ray_elem_size(s->type));
 }
 
-static ray_t* pq_write_direct(ray_parquet_t* r, ray_col_stream_t* writers) {
+static ray_t* pq_write_direct(ray_parquet_t* r, ray_col_stream_t* writers, bool shared_locked) {
     int64_t chunks = r->ngroups*r->ncols;
     if (chunks > UINT32_MAX) return pq_error("too many column chunk tasks");
     int64_t* offsets = ray_calloc_raw((size_t)(r->ngroups+1)*sizeof(*offsets));
@@ -3202,7 +3235,7 @@ static ray_t* pq_write_direct(ray_parquet_t* r, ray_col_stream_t* writers) {
                     (int)ray_str_len(nm),ray_str_ptr(nm),(double)bytes[order[i]]/1048576.0,(long long)bytes[order[i]],
                     (double)vocab[order[i]]/1048576.0,(long long)vocab[order[i]],(int)donly[order[i]],i < nd ? "direct" : "grouped");
         }
-    if (!grouped && nnum < r->ncols && writers[order[nnum]].dom) {
+    if (!shared_locked && !grouped && nnum < r->ncols && writers[order[nnum]].dom) {
         symf.dom = writers[order[nnum]].dom;
         fdoms = ray_alloc_raw((size_t)(r->ncols-nnum)*sizeof(*fdoms));
         if (!fdoms) { err = ray_error("oom",NULL); goto done; }
@@ -3370,7 +3403,8 @@ static void pq_release_doms(ray_sym_domain_t** doms, int64_t n) {
     for (int64_t c = 0; c < n; c++) if (doms[c]) ray_sym_domain_release(doms[c]);
     ray_free_raw(doms);
 }
-ray_t* ray_parquet_splayed_typed(const char* path, const char* dir, ray_t* types) {
+static ray_t* pq_splayed_impl(const char* path, const char* dir, ray_t* types,
+                              const char* shared_sym) {
 #ifdef RAY_FUZZING
     return ray_error("restricted","Parquet imports disabled under fuzzing");
 #endif
@@ -3382,9 +3416,40 @@ ray_t* ray_parquet_splayed_typed(const char* path, const char* dir, ray_t* types
     char staging[1100], spool[1200], leaf[1500], file[1700];
     ray_col_stream_t* writers = NULL; int64_t opened = 0, parts = 0;
     ray_err_t e = RAY_OK; ray_sym_domain_t* domain = NULL;
+    ray_fd_t sym_lock = RAY_FD_INVALID;
     ray_sym_domain_t** cdoms = NULL;   /* symfile 'column: column c's own domain, or NULL */
     err = pq_import_types(r,types);
     if (err) goto done;
+    if (r->date_partition[0] && !shared_sym) {
+        err = ray_error("domain","parquet: partition is supported by .parquet.parted only"); goto done;
+    }
+    if (shared_sym && r->symcol) {
+        err = ray_error("domain","parquet: shared date root cannot use symfile 'column"); goto done;
+    }
+    if (shared_sym) {
+        for (int64_t c = 0; c < r->ncols; c++) {
+            ray_t* nm = ray_sym_str(r->schema[c].name);
+            if (nm && !strcmp(ray_str_ptr(nm),"date")) {
+                err = ray_error("domain","parquet: column conflicts with date partition key"); goto done;
+            }
+        }
+        char lock_path[1200];
+        int n = snprintf(lock_path,sizeof(lock_path),"%s.lk",shared_sym);
+        if (n < 0 || (size_t)n >= sizeof(lock_path)) { err = pq_error("shared symbol lock path too long"); goto done; }
+        sym_lock = ray_file_open(lock_path,RAY_OPEN_READ | RAY_OPEN_WRITE | RAY_OPEN_CREATE);
+        if (sym_lock == RAY_FD_INVALID) { err = pq_error("cannot open shared symbol lock"); goto done; }
+        e = ray_file_lock_ex(sym_lock);
+        if (e != RAY_OK) { err = ray_error(ray_err_code_str(e),"parquet: cannot lock shared symbols"); goto done; }
+#if !defined(RAY_OS_WINDOWS)
+        struct stat sym_st, input_st;
+        if (lstat(shared_sym,&sym_st) == 0) {
+            if (!S_ISREG(sym_st.st_mode) || sym_st.st_nlink != 1 ||
+                (stat(path,&input_st) == 0 && sym_st.st_dev == input_st.st_dev && sym_st.st_ino == input_st.st_ino)) {
+                err = ray_error("domain","parquet: unsafe shared symbol file"); goto done;
+            }
+        } else if (errno != ENOENT) { err = pq_error("cannot inspect shared symbol file"); goto done; }
+#endif
+    }
     err = pq_stage(r,dir,staging,sizeof(staging),false);
     if (err) goto done;
     writers = ray_calloc_raw((size_t)r->ncols*sizeof(*writers));
@@ -3402,11 +3467,12 @@ ray_t* ray_parquet_splayed_typed(const char* path, const char* dir, ray_t* types
         /* shared: one symbol file, `.sym`; symfile 'column: each symbol
          * column's own, `.<col>.sym` (ray_splay_col_sym_path) */
         ray_t* nm = ray_sym_str(r->schema[c].name);
-        if (!cdoms) snprintf(file,sizeof(file),"%s/.sym",staging);
+        if (shared_sym) snprintf(file,sizeof(file),"%s",shared_sym);
+        else if (!cdoms) snprintf(file,sizeof(file),"%s/.sym",staging);
         else if (!nm || !ray_splay_col_sym_path(file,sizeof(file),staging,ray_str_ptr(nm),ray_str_len(nm))) {
             err = pq_error("symbol file path is too long"); goto done;
         }
-        ray_sym_domain_t* d = str_cols ? NULL : ray_sym_domain_create_import(file);
+        ray_sym_domain_t* d = (str_cols || shared_sym) ? NULL : ray_sym_domain_create_import(file);
         if (!d) d = ray_sym_domain_open_or_create(file);
         if (!d) { err = ray_error("oom",NULL); goto done; }
         if (cdoms) cdoms[c] = d; else domain = d;
@@ -3433,7 +3499,7 @@ ray_t* ray_parquet_splayed_typed(const char* path, const char* dir, ray_t* types
     bool trace = getenv("RAY_CSV_TRACE") != NULL;
     int64_t tp = trace ? ray_profile_now_ns() : 0;
     if (direct) {
-        err = pq_write_direct(r,writers);
+        err = pq_write_direct(r,writers,shared_sym != NULL);
         if (err) goto done;
         goto finish_columns;
     }
@@ -3471,7 +3537,7 @@ finish_columns:
     if (trace) { fprintf(stderr,"parquet phase: passes=%.1fms\n",(double)(ray_profile_now_ns()-tp)/1e6); tp = ray_profile_now_ns(); }
     /* the direct import appended the symbols as they came: this writes
      * what is left and syncs the file */
-    if (domain) { e = ray_sym_domain_flush_append(domain,true); if (e != RAY_OK) goto io_fail; }
+    if (domain) { e = shared_sym ? ray_sym_domain_flush_locked(domain,true) : ray_sym_domain_flush_append(domain,true); if (e != RAY_OK) goto io_fail; }
     for (int64_t c = 0; cdoms && c < r->ncols; c++)
         if (cdoms[c]) { e = ray_sym_domain_flush_append(cdoms[c],true); if (e != RAY_OK) goto io_fail; }
     if (trace) { fprintf(stderr,"parquet phase: sym flush=%.1fms\n",(double)(ray_profile_now_ns()-tp)/1e6); tp = ray_profile_now_ns(); }
@@ -3534,7 +3600,67 @@ io_fail:
 done:
     for (int64_t c = 0; c < opened; c++) ray_col_stream_abort(&writers[c]);
     ray_free_raw(writers); if (domain) ray_sym_domain_release(domain);
-    pq_release_doms(cdoms,r ? r->ncols : 0); ray_parquet_close(r); return err;
+    pq_release_doms(cdoms,r ? r->ncols : 0);
+    if (sym_lock != RAY_FD_INVALID) { (void)ray_file_unlock(sym_lock); ray_file_close(sym_lock); }
+    ray_parquet_close(r); return err;
+}
+
+ray_t* ray_parquet_splayed_typed(const char* path, const char* dir, ray_t* types) {
+    return pq_splayed_impl(path,dir,types,NULL);
+}
+/* A date partition contains one complete table. The temporary date directory
+ * stays hidden from parted discovery; only the final rename publishes it. */
+static ray_t* pq_write_date(const char* path, const char* root, const char* table,
+                            ray_t* types, const char* date) {
+    char partition[1200], staging[1200], leaf[1400], sym[1200];
+    int a = snprintf(partition,sizeof(partition),"%s/%s",root,date);
+    int b = snprintf(staging,sizeof(staging),"%s/.%s.parquet-date-partial",root,date);
+    int c = snprintf(leaf,sizeof(leaf),"%s/%s",staging,table);
+    int d = snprintf(sym,sizeof(sym),"%s/.sym",root);
+    if (a < 0 || (size_t)a >= sizeof(partition) || b < 0 || (size_t)b >= sizeof(staging) ||
+        c < 0 || (size_t)c >= sizeof(leaf) || d < 0 || (size_t)d >= sizeof(sym))
+        return pq_error("date partition path too long");
+    struct stat st;
+    bool root_new = stat(root,&st) != 0 && errno == ENOENT;
+    ray_err_t e = ray_mkdir(root);
+    if (e != RAY_OK || stat(root,&st) != 0 || !S_ISDIR(st.st_mode))
+        return pq_error("date root cannot be created or is not a directory");
+    if (root_new && ray_file_sync_dir(root) != RAY_OK)
+        return pq_error("cannot sync date root parent");
+    /* A digit/dot entry participates in parted key inference. Never publish
+     * a DATE leaf into a numeric or mixed root that would change the key to
+     * an opaque symbol and silently drop its virtual date column. */
+    DIR* dir = opendir(root);
+    if (!dir) return pq_error("cannot inspect date root");
+    struct dirent* ent; bool compatible = true;
+    while ((ent = readdir(dir)) != NULL) {
+        const char* n = ent->d_name;
+        if (!*n || *n == '.') continue;
+        bool partition_name = true;
+        for (const char* p = n; *p; p++)
+            if (*p != '.' && (*p < '0' || *p > '9')) { partition_name = false; break; }
+        if (partition_name && !pq_date_name(n,strlen(n))) { compatible = false; break; }
+    }
+    closedir(dir);
+    if (!compatible) return ray_error("domain","parquet: date root contains non-date partitions");
+    if (stat(partition,&st) == 0) return pq_error("date partition already exists");
+    if (errno != ENOENT) return pq_error("cannot inspect date partition");
+#ifdef RAY_OS_WINDOWS
+    bool created = CreateDirectoryA(staging,NULL) != 0;
+#else
+    bool created = mkdir(staging,0755) == 0;
+#endif
+    if (!created) return pq_error("cannot create date staging directory; remove retained staging to retry");
+    ray_t* result = pq_splayed_impl(path,leaf,types,sym);
+    if (!result || RAY_IS_ERR(result)) return result ? result : ray_error("oom",NULL);
+    if (ray_interrupted()) { ray_release(result); return ray_error("cancel","parquet conversion interrupted"); }
+    if (ray_file_sync_dir(leaf) != RAY_OK || ray_file_rename_new(staging,partition) != RAY_OK) {
+        ray_release(result); return pq_error("cannot publish date partition; staging directory retained");
+    }
+    if (ray_file_sync_dir(partition) != RAY_OK) {
+        ray_release(result); return pq_error("date partition published but root sync failed");
+    }
+    return result;
 }
 
 ray_t* ray_parquet_splayed(const char* path, const char* dir) {

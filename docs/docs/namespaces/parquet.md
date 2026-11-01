@@ -103,12 +103,33 @@ order. The default maximum partition size is 65,536 rows. `rows` accepts
 (set events (.db.parted.get "/tmp/events-db" 'events))
 ```
 
-Both native conversions require an existing parent directory and a new
-destination. They write to `<destination>.parquet-partial`, sync the completed
-output, and publish it without replacing an existing destination. Failed staging
-data is retained; existing staging directories are rejected. Imports do not
-support resume or append. Format or conversion failures return `parquet`
-errors; argument, I/O, allocation, and cancellation errors also propagate.
+The optional `partition` string selects a single date partition instead:
+
+```lisp
+(.parquet.parted {types: [I64 SYM] partition: "2026.10.29"}
+  "events.parquet" "/tmp/events-db" 'events)
+(set events (.db.parted.get "/tmp/events-db" 'events))
+```
+
+The date must be a valid `YYYY.MM.DD` string. This form writes the entire
+file in source order to `root/2026.10.29/events`; it does not make numbered
+partitions. Its symbols use the root's shared `.sym`, including an existing
+root vocabulary. `rows` controls the conversion's batch size in this form,
+not the number of rows in the date partition. An existing target date is
+rejected: this is not an append or replacement operation. A root containing
+numbered partitions is rejected at the start. That check does not lock the
+root against other publishers; callers must serialize changes to its
+partition names while a date import is in progress.
+
+The numbered conversion and `.parquet.splayed` require an existing parent
+directory and a new destination. They write to `<destination>.parquet-partial`,
+sync the completed output, and publish it without replacing an existing
+destination. The date form can add a new date to an existing root, staging
+before publishing that date; it also does not replace an existing date. Failed
+staging data is retained; existing staging directories are rejected. Imports
+do not support resume or append. Format or conversion failures return
+`parquet` errors; argument, I/O, allocation, and cancellation errors also
+propagate.
 
 The options dict also takes `compress`: `true` writes generation-2
 (compressed) column files where the column is eligible, `false` (or no

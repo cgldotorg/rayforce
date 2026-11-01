@@ -787,6 +787,282 @@ static test_result_t test_pq_parted_symbols(void) {
     }
     pq_remove_native(root,NULL,0); ray_pool_destroy(); PASS();
 }
+
+/* A date option belongs to .parquet.parted, not its splayed sibling. */
+static ray_t* pq_date_opts(ray_t* types, ray_t* date) {
+    int64_t keys[] = {ray_sym_intern("types",5), ray_sym_intern("partition",9)};
+    ray_t* values = ray_list_new(2);
+    if (!values || RAY_IS_ERR(values)) return values;
+    ray_retain(types); ray_retain(date);
+    ((ray_t**)ray_data(values))[0] = types;
+    ((ray_t**)ray_data(values))[1] = date;
+    values->len = 2;
+    return ray_dict_new(ray_vec_from_raw(RAY_SYM,keys,2),values);
+}
+
+/* Two date imports share one root vocabulary. The second adds many symbols;
+ * the first partition must retain its values and a reader held across
+ * publication keeps its row count. The row-group fixture is checked row by row so the
+ * streamed, single-leaf result cannot silently omit a group or its nulls. */
+static test_result_t test_pq_date_parted(void) {
+    char root[160], sym[200], leaf0[220], leaf1[220], date0[200], date1[200], path[260];
+    snprintf(root,sizeof(root),"%s",ray_test_tmp("/tmp/rayforce-pq-date"));
+    snprintf(sym,sizeof(sym),"%s/.sym",root);
+    snprintf(date0,sizeof(date0),"%s/2026.10.28",root);
+    snprintf(date1,sizeof(date1),"%s/2026.10.29",root);
+    snprintf(leaf0,sizeof(leaf0),"%s/hits",date0);
+    snprintf(leaf1,sizeof(leaf1),"%s/hits",date1);
+    (void)ray_test_rm_rf(root);
+    TEST_ASSERT_EQ_I(ray_test_mkdir_p(root),0);
+    TEST_ASSERT_EQ_I(pq_pool(4),RAY_OK);
+    int64_t ids[] = {ray_sym_intern("I32",3),ray_sym_intern("I64",3),ray_sym_intern("SYM",3)};
+    ray_t* types = ray_vec_from_raw(RAY_SYM,ids,3);
+    ray_t* day0 = ray_str("2026.10.28",10);
+    ray_t* day1 = ray_str("2026.10.29",10);
+    ray_t* opts = pq_date_opts(types,day0);
+    ray_t* r = ray_parquet_parted_typed(FIX "rle-runs.parquet",root,"hits",opts);
+    ray_release(opts);
+    TEST_ASSERT_TRUE(r && !RAY_IS_ERR(r)); TEST_ASSERT_EQ_I(r->i64,24597); ray_release(r);
+    struct stat st;
+    TEST_ASSERT_EQ_I(stat(sym,&st),0);
+    TEST_ASSERT_EQ_I(stat(leaf0,&st),0);
+    ray_t* held = ray_read_parted(root,"hits");
+    TEST_ASSERT_TRUE(held && !RAY_IS_ERR(held));
+    TEST_ASSERT_EQ_I(ray_table_nrows(held),24597);
+    ray_t* before = ray_read_splayed(leaf0,sym);
+    TEST_ASSERT_TRUE(before && !RAY_IS_ERR(before));
+    ray_t* bs = ray_table_get_col_idx(before,2);
+    TEST_ASSERT_EQ_I(bs->type,RAY_SYM);
+    int64_t seed_id = ray_read_sym(ray_data(bs),0,RAY_SYM,bs->attrs);
+    TEST_ASSERT_TRUE(seed_id > 0);
+    ray_t* seed = ray_sym_vec_cell(bs,0);
+    TEST_ASSERT_NOT_NULL(seed);
+    TEST_ASSERT_STR_EQ(ray_str_ptr(seed),"a repeated pooled string");
+    ray_release(before);
+
+    opts = pq_date_opts(types,day1);
+    r = ray_parquet_parted_typed(FIX "row-groups.parquet",root,"hits",opts);
+    ray_release(opts);
+    TEST_ASSERT_TRUE(r && !RAY_IS_ERR(r)); TEST_ASSERT_EQ_I(r->i64,44009); ray_release(r);
+    TEST_ASSERT_EQ_I(stat(leaf1,&st),0);
+    snprintf(path,sizeof(path),"%s/.sym",leaf1);
+    TEST_ASSERT_TRUE(stat(path,&st)!=0); /* symbols belong to root/.sym */
+
+    ray_t* date_table = ray_read_splayed(leaf1,sym);
+    TEST_ASSERT_TRUE(date_table && !RAY_IS_ERR(date_table));
+    TEST_ASSERT_EQ_I(ray_table_nrows(date_table),44009);
+    ray_t* x = ray_table_get_col_idx(date_table,0);
+    ray_t* y = ray_table_get_col_idx(date_table,1);
+    ray_t* s = ray_table_get_col_idx(date_table,2);
+    TEST_ASSERT_EQ_I(x->type,RAY_I32); TEST_ASSERT_EQ_I(y->type,RAY_I64); TEST_ASSERT_EQ_I(s->type,RAY_SYM);
+    for (int64_t i=0; i<44009; i++) {
+        TEST_ASSERT_EQ_I(((int32_t*)ray_data(x))[i],i);
+        TEST_ASSERT_EQ_I(((int64_t*)ray_data(y))[i],i%13 ? i*3 : NULL_I64);
+        TEST_ASSERT_EQ_I(ray_vec_is_null(y,i),i%13==0);
+        char expected[64]; int n=snprintf(expected,sizeof(expected),"long pooled string row %lld",(long long)i);
+        ray_t* atom=ray_sym_vec_cell(s,i);
+        TEST_ASSERT_NOT_NULL(atom); TEST_ASSERT_EQ_I(ray_str_len(atom),n);
+        TEST_ASSERT_TRUE(!memcmp(ray_str_ptr(atom),expected,(size_t)n));
+    }
+    ray_release(date_table);
+
+    /* The older table's domain prefix must survive extension. Read the leaf
+     * again against the final shared file. */
+    before = ray_read_splayed(leaf0,sym);
+    TEST_ASSERT_TRUE(before && !RAY_IS_ERR(before));
+    bs = ray_table_get_col_idx(before,2);
+    TEST_ASSERT_EQ_I(ray_read_sym(ray_data(bs),0,RAY_SYM,bs->attrs),seed_id);
+    TEST_ASSERT_STR_EQ(ray_str_ptr(ray_sym_vec_cell(bs,0)),"a repeated pooled string");
+    TEST_ASSERT_EQ_I(((int32_t*)ray_data(ray_table_get_col_idx(before,0)))[0],7);
+    TEST_ASSERT_EQ_I(((int64_t*)ray_data(ray_table_get_col_idx(before,1)))[0],11);
+    ray_release(before);
+    TEST_ASSERT_EQ_I(ray_table_nrows(held),24597);
+    ray_release(held);
+
+    ray_t* all = ray_read_parted(root,"hits");
+    TEST_ASSERT_TRUE(all && !RAY_IS_ERR(all));
+    TEST_ASSERT_EQ_I(ray_table_nrows(all),24597+44009);
+    TEST_ASSERT_EQ_I(ray_table_col_name(all,0),ray_sym_intern("date",4));
+    ray_t* date = ray_table_get_col_idx(all,0);
+    TEST_ASSERT_EQ_I(date->type,RAY_MAPCOMMON);
+    ray_t** mc = (ray_t**)ray_data(date);
+    TEST_ASSERT_EQ_I(mc[0]->type,RAY_DATE); TEST_ASSERT_EQ_I(mc[0]->len,2);
+    TEST_ASSERT_EQ_I(((int32_t*)ray_data(mc[0]))[0],9797);
+    TEST_ASSERT_EQ_I(((int32_t*)ray_data(mc[0]))[1],9798);
+    TEST_ASSERT_EQ_I(((int64_t*)ray_data(mc[1]))[0],24597);
+    TEST_ASSERT_EQ_I(((int64_t*)ray_data(mc[1]))[1],44009);
+    ray_release(all);
+
+    /* An existing day must not be replaced, or add symbols from a rejected
+     * import. Reopen the original leaf after the failed attempt. */
+    opts = pq_date_opts(types,day1);
+    r = ray_parquet_parted_typed(FIX "rle-runs.parquet",root,"hits",opts);
+    ray_release(opts);
+    TEST_ASSERT_TRUE(r && RAY_IS_ERR(r)); ray_error_free(r);
+    date_table = ray_read_splayed(leaf1,sym);
+    TEST_ASSERT_TRUE(date_table && !RAY_IS_ERR(date_table));
+    TEST_ASSERT_EQ_I(ray_table_nrows(date_table),44009);
+    ray_release(date_table);
+
+    const char* names[] = {"x","y","s"};
+    pq_remove_native(leaf0,names,3); pq_remove_native(leaf1,names,3);
+    rmdir(date0); rmdir(date1);
+    ray_parted_cache_clear();
+    pq_remove_native(root,NULL,0);
+    ray_release(day0); ray_release(day1); ray_release(types); ray_pool_destroy();
+    PASS();
+}
+
+static test_result_t test_pq_date_parted_options(void) {
+    char root[160], path[220], splayed[180];
+    snprintf(root,sizeof(root),"%s",ray_test_tmp("/tmp/rayforce-pq-baddate"));
+    snprintf(splayed,sizeof(splayed),"%s",ray_test_tmp("/tmp/rayforce-pq-date-splayed"));
+    (void)ray_test_rm_rf(root); (void)ray_test_rm_rf(splayed);
+    TEST_ASSERT_EQ_I(ray_test_mkdir_p(root),0);
+    int64_t ids[] = {ray_sym_intern("I32",3),ray_sym_intern("I64",3),ray_sym_intern("SYM",3)};
+    ray_t* types = ray_vec_from_raw(RAY_SYM,ids,3);
+    const char* bad[] = {"2026.2.01","2026.02.29","2026.13.01","2026.10.00", "../2026.10.29", "2026.10.29/child", ""};
+    for (size_t i=0; i<sizeof(bad)/sizeof(bad[0]); i++) {
+        ray_t* day = ray_str(bad[i],strlen(bad[i])); ray_t* opts = pq_date_opts(types,day);
+        ray_t* r = ray_parquet_parted_typed(FIX "rle-runs.parquet",root,"hits",opts);
+        ray_release(opts); ray_release(day);
+        TEST_ASSERT_TRUE(r && RAY_IS_ERR(r)); ray_error_free(r);
+    }
+    /* Embedded NUL and non-string values must not become filesystem paths. */
+    const char with_nul[] = "2026.10.29\0x";
+    ray_t* bad_nul = ray_str(with_nul,sizeof(with_nul)-1);
+    ray_t* opts = pq_date_opts(types,bad_nul);
+    ray_t* r = ray_parquet_parted_typed(FIX "rle-runs.parquet",root,"hits",opts);
+    ray_release(opts); ray_release(bad_nul);
+    TEST_ASSERT_TRUE(r && RAY_IS_ERR(r)); ray_error_free(r);
+    ray_t* number = ray_i64(20261029); opts = pq_date_opts(types,number);
+    r = ray_parquet_parted_typed(FIX "rle-runs.parquet",root,"hits",opts);
+    ray_release(opts); ray_release(number);
+    TEST_ASSERT_TRUE(r && RAY_IS_ERR(r)); ray_error_free(r);
+    snprintf(path,sizeof(path),"%s/2026.10.29",root);
+    struct stat st; TEST_ASSERT_TRUE(stat(path,&st)!=0);
+
+    ray_t* day = ray_str("2026.10.29",10); opts = pq_date_opts(types,day);
+    r = ray_parquet_splayed_typed(FIX "rle-runs.parquet",splayed,opts);
+    ray_release(opts); ray_release(day);
+    TEST_ASSERT_TRUE(r && RAY_IS_ERR(r)); ray_error_free(r);
+    TEST_ASSERT_TRUE(stat(splayed,&st)!=0);
+    ray_release(types); (void)ray_test_rm_rf(root); (void)ray_test_rm_rf(splayed);
+    PASS();
+}
+
+/* Adding a date beside numbered partitions would change the root's virtual
+ * key from numeric to symbol. Reject it before changing the shared domain
+ * or publishing anything, and leave the original numbered table readable. */
+static test_result_t test_pq_date_rejects_numbered_root(void) {
+    char root[160], sym[200], day_path[200], staging[220], leaf[220];
+    snprintf(root,sizeof(root),"%s",ray_test_tmp("/tmp/rayforce-pq-mixed-root"));
+    snprintf(sym,sizeof(sym),"%s/.sym",root);
+    snprintf(day_path,sizeof(day_path),"%s/2026.10.29",root);
+    snprintf(staging,sizeof(staging),"%s/.2026.10.29.parquet-date-partial",root);
+    snprintf(leaf,sizeof(leaf),"%s/0/hits",root);
+    (void)ray_test_rm_rf(root);
+    int64_t ids[] = {ray_sym_intern("I32",3),ray_sym_intern("I64",3),ray_sym_intern("SYM",3)};
+    ray_t* types=ray_vec_from_raw(RAY_SYM,ids,3);
+    ray_t* r=ray_parquet_parted_typed(FIX "rle-runs.parquet",root,"hits",types);
+    TEST_ASSERT_TRUE(r && !RAY_IS_ERR(r)); TEST_ASSERT_EQ_I(r->i64,24597); ray_release(r);
+    ray_t* old=ray_read_parted(root,"hits");
+    TEST_ASSERT_TRUE(old && !RAY_IS_ERR(old)); TEST_ASSERT_EQ_I(ray_table_nrows(old),24597);
+    TEST_ASSERT_EQ_I(ray_table_col_name(old,0),ray_sym_intern("part",4));
+    ray_t* key=ray_table_get_col_idx(old,0);
+    TEST_ASSERT_EQ_I(key->type,RAY_MAPCOMMON);
+    TEST_ASSERT_EQ_I(((ray_t**)ray_data(key))[0]->type,RAY_I64);
+    ray_release(old);
+
+    char before[4096], after[4096];
+    FILE* f=fopen(sym,"rb"); TEST_ASSERT_NOT_NULL(f);
+    size_t nb=fread(before,1,sizeof(before),f);
+    TEST_ASSERT_TRUE(nb>0 && nb<sizeof(before)); TEST_ASSERT_TRUE(feof(f));
+    TEST_ASSERT_EQ_I(fclose(f),0);
+    ray_t* day=ray_str("2026.10.29",10); ray_t* opts=pq_date_opts(types,day);
+    r=ray_parquet_parted_typed(FIX "row-groups.parquet",root,"hits",opts);
+    ray_release(opts); ray_release(day);
+    TEST_ASSERT_TRUE(r && RAY_IS_ERR(r)); ray_error_free(r);
+
+    struct stat st;
+    TEST_ASSERT_TRUE(stat(day_path,&st)!=0); TEST_ASSERT_TRUE(stat(staging,&st)!=0);
+    TEST_ASSERT_EQ_I(stat(leaf,&st),0);
+    f=fopen(sym,"rb"); TEST_ASSERT_NOT_NULL(f);
+    size_t na=fread(after,1,sizeof(after),f);
+    TEST_ASSERT_TRUE(na<sizeof(after)); TEST_ASSERT_TRUE(feof(f));
+    TEST_ASSERT_EQ_I(fclose(f),0); TEST_ASSERT_EQ_U(na,nb); TEST_ASSERT_MEM_EQ(nb,after,before);
+    ray_t* still=ray_read_parted(root,"hits");
+    TEST_ASSERT_TRUE(still && !RAY_IS_ERR(still)); TEST_ASSERT_EQ_I(ray_table_nrows(still),24597);
+    TEST_ASSERT_EQ_I(ray_table_col_name(still,0),ray_sym_intern("part",4));
+    ray_release(still);
+    ray_t* first=ray_read_splayed(leaf,sym);
+    TEST_ASSERT_TRUE(first && !RAY_IS_ERR(first));
+    TEST_ASSERT_STR_EQ(ray_str_ptr(ray_sym_vec_cell(ray_table_get_col_idx(first,2),0)),"a repeated pooled string");
+    ray_release(first); ray_release(types); ray_parted_cache_clear();
+    (void)ray_test_rm_rf(root);
+    PASS();
+}
+
+#if !defined(RAY_OS_WINDOWS) && !defined(RAY_OS_WASM)
+/* Two processes add disjoint symbols to a previously empty root at once.
+ * Both must finish, and both published partitions must resolve using the one
+ * persisted dictionary. A pre-opened pipe synchronizes their start; each
+ * child has its own runtime after fork and no worker pool is running yet. */
+static test_result_t test_pq_date_shared_concurrent(void) {
+    char root[160], sym[200], seed[220], rows[220];
+    snprintf(root,sizeof(root),"%s",ray_test_tmp("/tmp/rayforce-pq-date-concurrent"));
+    snprintf(sym,sizeof(sym),"%s/.sym",root);
+    snprintf(seed,sizeof(seed),"%s/2026.10.28/hits",root);
+    snprintf(rows,sizeof(rows),"%s/2026.10.29/hits",root);
+    (void)ray_test_rm_rf(root);
+    TEST_ASSERT_EQ_I(ray_test_mkdir_p(root),0);
+    int go[2]; TEST_ASSERT_EQ_I(pipe(go),0);
+    pid_t kids[2] = {-1,-1};
+    for (int i=0; i<2; i++) {
+        kids[i] = fork();
+        TEST_ASSERT_TRUE(kids[i]>=0);
+        if (kids[i]==0) {
+            close(go[1]);
+            alarm(30);
+            char signal;
+            if (read(go[0],&signal,1)!=1) _exit(2);
+            close(go[0]);
+            int64_t ids[] = {ray_sym_intern("I32",3),ray_sym_intern("I64",3),ray_sym_intern("SYM",3)};
+            ray_t* types=ray_vec_from_raw(RAY_SYM,ids,3);
+            const char* name=i ? "2026.10.29" : "2026.10.28";
+            ray_t* day=ray_str(name,10);ray_t* opts=pq_date_opts(types,day);
+            ray_t* r=ray_parquet_parted_typed(i ? FIX "row-groups.parquet" : FIX "rle-runs.parquet",root,"hits",opts);
+            int code=(!r || RAY_IS_ERR(r) || r->i64!=(i ? 44009 : 24597)) ? 3 : 0;
+            if (r && RAY_IS_ERR(r)) ray_error_free(r); else if (r) ray_release(r);
+            ray_release(opts);ray_release(day);ray_release(types);
+            _exit(code);
+        }
+    }
+    close(go[0]);
+    TEST_ASSERT_EQ_I(write(go[1],"xx",2),2);
+    close(go[1]);
+    for (int i=0; i<2; i++) {
+        int status=0;
+        TEST_ASSERT_EQ_I(waitpid(kids[i],&status,0),kids[i]);
+        TEST_ASSERT_TRUE(WIFEXITED(status)); TEST_ASSERT_EQ_I(WEXITSTATUS(status),0);
+    }
+    ray_t* a=ray_read_splayed(seed,sym);
+    ray_t* b=ray_read_splayed(rows,sym);
+    TEST_ASSERT_TRUE(a && !RAY_IS_ERR(a)); TEST_ASSERT_TRUE(b && !RAY_IS_ERR(b));
+    TEST_ASSERT_EQ_I(ray_table_nrows(a),24597); TEST_ASSERT_EQ_I(ray_table_nrows(b),44009);
+    TEST_ASSERT_STR_EQ(ray_str_ptr(ray_sym_vec_cell(ray_table_get_col_idx(a,2),0)),"a repeated pooled string");
+    for (int i=0; i<44009; i++) {
+        char expected[64]; int n=snprintf(expected,sizeof(expected),"long pooled string row %d",i);
+        ray_t* atom=ray_sym_vec_cell(ray_table_get_col_idx(b,2),i);
+        TEST_ASSERT_NOT_NULL(atom); TEST_ASSERT_EQ_I(ray_str_len(atom),n);
+        TEST_ASSERT_TRUE(!memcmp(ray_str_ptr(atom),expected,(size_t)n));
+    }
+    ray_release(a);ray_release(b);
+    ray_parted_cache_clear();
+    (void)ray_test_rm_rf(root);
+    PASS();
+}
+#endif
 #if !defined(RAY_OS_WINDOWS) && !defined(RAY_OS_WASM)
 static void* pq_small_stack_worker(void* result) {
     pq_setup();
@@ -4114,6 +4390,12 @@ const test_entry_t parquet_entries[] = {
     {"parquet/sk_codec_message",test_pq_sk_codec_message,pq_setup,pq_teardown},
     {"parquet/small_stack",test_pq_small_stack,NULL,NULL},
     {"parquet/parted_symbols",test_pq_parted_symbols,pq_setup,pq_teardown},
+    {"parquet/date_parted",test_pq_date_parted,pq_setup,pq_teardown},
+    {"parquet/date_parted_options",test_pq_date_parted_options,pq_setup,pq_teardown},
+    {"parquet/date_rejects_numbered_root",test_pq_date_rejects_numbered_root,pq_setup,pq_teardown},
+#if !defined(RAY_OS_WINDOWS) && !defined(RAY_OS_WASM)
+    {"parquet/date_shared_concurrent",test_pq_date_shared_concurrent,pq_setup,pq_teardown},
+#endif
     {"parquet/snappy",test_pq_snappy,pq_setup,pq_teardown},
     {"parquet/batch_matrix",test_pq_matrix,pq_setup,pq_teardown},
     {"parquet/read_metadata",test_pq_read_meta,pq_setup,pq_teardown},
