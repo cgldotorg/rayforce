@@ -28,15 +28,18 @@ Signatures:
 - `(.db.splayed.set "dir" tbl)` — write columns to `dir/`; emit a `.sym` file in the same directory.
 - `(.db.splayed.set "dir" tbl "sym_path")` — write the symbol table to a custom location (typically a shared db-root `.sym`).
 
+- `(.db.splayed.set "dir" tbl "sym_path" 'nosync)` — as the 3-argument form, without an fsync of any file, symfile or directory it writes. Each file is still written under a temporary name and renamed into place, and a table that replaces an existing one is still published as a new generation; only a power loss or a kernel crash can leave written data unflushed to disk. For a table the caller can rebuild, such as a derived copy. The default form is unchanged.
+
 Returns `tbl` (retained), so the call can be threaded inside a larger expression.
 
-Errors: `type` (dir/sym not strings, tbl not a table), `domain` (paths empty / too long), and any `io`/`oom`/`corrupt` error code surfaced by the splayed writer.
+Errors: `type` (dir/sym not strings, tbl not a table, the 4th argument not a symbol), `domain` (paths empty / too long, the 4th argument a symbol other than `'nosync`), and any `io`/`oom`/`corrupt` error code surfaced by the splayed writer.
 
 ```lisp
 (set t (table [city temp rain]
   (list ['London 'Paris 'Tokyo] [15 22 28] [120.5 60.3 200.1])))
 
 (.db.splayed.set "/tmp/weather" t)
+(.db.splayed.set "/tmp/weather_copy" t "/tmp/weather_copy/.sym" 'nosync)
 ```
 
 ## `.db.splayed.get` { #db-splayed-get }
