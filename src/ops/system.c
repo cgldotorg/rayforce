@@ -177,10 +177,28 @@ static const char* str_to_cpath(ray_t* s, char* buf, size_t bufsz) {
     return buf;
 }
 
-/* (.db.splayed.set "dir" table) or (.db.splayed.set "dir" table "sym_path") */
+/* (.db.splayed.set "dir" table), (.db.splayed.set "dir" table "sym_path") or
+ * (.db.splayed.set "dir" table "sym_path" 'nosync).
+ *
+ * 'nosync writes every file without an fsync, through the same temporary
+ * names, renames and generation publish as the default: only a power loss or
+ * a kernel crash can leave written data unflushed. For a table the caller
+ * can rebuild. */
 ray_t* ray_set_splayed_fn(ray_t** args, int64_t n) {
-    if (n < 2 || n > 3)
-        return ray_error("domain", ".db.splayed.set expects 2 or 3 arguments, got %lld", (long long)n);
+    if (n < 2 || n > 4)
+        return ray_error("domain", ".db.splayed.set expects 2 to 4 arguments, got %lld", (long long)n);
+
+    bool durable = true;
+    if (n == 4) {
+        ray_t* opt = args[3];
+        if (!opt || opt->type != -RAY_SYM)
+            return ray_error("type", ".db.splayed.set expects the symbol 'nosync as its 4th argument, got %s",
+                             opt ? ray_type_name(opt->type) : "null");
+        ray_t* name = ray_sym_str(opt->i64);
+        if (!name || ray_str_len(name) != 6 || memcmp(ray_str_ptr(name), "nosync", 6) != 0)
+            return ray_error("domain", ".db.splayed.set expects the symbol 'nosync as its 4th argument");
+        durable = false;
+    }
 
     char dir[1024];
     if (!str_to_cpath(args[0], dir, sizeof(dir)))
@@ -192,12 +210,13 @@ ray_t* ray_set_splayed_fn(ray_t** args, int64_t n) {
 
     char sym[1024];
     const char* sym_path = NULL;
-    if (n == 3 && args[2] && args[2]->type == -RAY_STR)
+    if (n >= 3 && args[2] && args[2]->type == -RAY_STR)
         sym_path = str_to_cpath(args[2], sym, sizeof(sym));
     else
         sym_path = splay_resolve_sym(dir, sym, sizeof(sym), true);
 
-    ray_err_t err = ray_splay_save(tbl, dir, sym_path);
+    ray_err_t err = durable ? ray_splay_save(tbl, dir, sym_path)
+                            : ray_splay_save_bulk(tbl, dir, sym_path);
     if (err != RAY_OK) return ray_error(ray_err_code_str(err), NULL);
 
     ray_retain(tbl);

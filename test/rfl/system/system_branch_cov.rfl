@@ -26,7 +26,7 @@
 ;; ray_set_splayed_fn  (lines 78-99) — arity / type guards
 ;; ══════════════════════════════════════════════════════════════════════
 (.db.splayed.set "/tmp/rfl_sys_bc_a") !- domain
-(.db.splayed.set "/tmp/rfl_sys_bc_a" (table [x] (list [1])) "/tmp/foo" "extra") !- domain
+(.db.splayed.set "/tmp/rfl_sys_bc_a" (table [x] (list [1])) "/tmp/foo" 'nosync "extra") !- domain
 (.db.splayed.set 42 (table [x] (list [1]))) !- type
 (.db.splayed.set "/tmp/rfl_sys_bc_a/" 42) !- type
 (.db.splayed.set "/tmp/rfl_sys_bc_a/" null) !- type

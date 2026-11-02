@@ -1,0 +1,32 @@
+;; @requires: posix  (fixtures are removed through a POSIX shell via .sys.exec)
+;; (.db.splayed.set dir tbl sym_path 'nosync) writes the table the default
+;; call writes, without the fsyncs: what a caller that can rebuild the table
+;; passes, and nobody else.
+
+(.sys.exec "rm -rf /tmp/rfl_nosync") -- 0
+
+;; Two partitions of one root, one symfile: the first written through the
+;; default call, the second with 'nosync, read back as one parted table.
+(set A (table [s px] (list (as 'SYMBOL ['AAA 'BBB 'AAA]) [1 2 3])))
+(set B (table [s px] (list (as 'SYMBOL ['BBB 'CCC]) [40 50])))
+(.db.splayed.set "/tmp/rfl_nosync/2024.01.15/t" A "/tmp/rfl_nosync/.sym") -- A
+(.db.splayed.set "/tmp/rfl_nosync/2024.01.16/t" B "/tmp/rfl_nosync/.sym" 'nosync) -- B
+(set P (.db.parted.get "/tmp/rfl_nosync" 't))
+(count P) -- 5
+(sum (at P 'px)) -- 96
+(count (select {from: P where: (== s 'CCC)})) -- 1
+(count (select {from: P where: (== s 'BBB)})) -- 2
+
+;; 'nosync publishes a new generation over an existing table as the default does.
+(.db.splayed.set "/tmp/rfl_nosync/2024.01.16/t" (table [s px] (list (as 'SYMBOL ['DDD]) [7])) "/tmp/rfl_nosync/.sym" 'nosync)
+(set Q (.db.parted.get "/tmp/rfl_nosync" 't))
+(list (count Q) (sum (at Q 'px))) -- (list 4 13)
+(count (select {from: Q where: (== s 'DDD)})) -- 1
+
+;; Only the symbol 'nosync is an option; a 5th argument is an arity error.
+(.db.splayed.set "/tmp/rfl_nosync/x/t" A "/tmp/rfl_nosync/.sym" 'sync) !- domain
+(.db.splayed.set "/tmp/rfl_nosync/x/t" A "/tmp/rfl_nosync/.sym" "nosync") !- type
+(.db.splayed.set "/tmp/rfl_nosync/x/t" A "/tmp/rfl_nosync/.sym" 1) !- type
+(.db.splayed.set "/tmp/rfl_nosync/x/t" A "/tmp/rfl_nosync/.sym" 'nosync 'nosync) !- domain
+
+(.sys.exec "rm -rf /tmp/rfl_nosync") -- 0
