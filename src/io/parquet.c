@@ -3433,12 +3433,7 @@ static ray_t* pq_splayed_impl(const char* path, const char* dir, ray_t* types,
                 err = ray_error("domain","parquet: column conflicts with date partition key"); goto done;
             }
         }
-        char lock_path[1200];
-        int n = snprintf(lock_path,sizeof(lock_path),"%s.lk",shared_sym);
-        if (n < 0 || (size_t)n >= sizeof(lock_path)) { err = pq_error("shared symbol lock path too long"); goto done; }
-        sym_lock = ray_file_open(lock_path,RAY_OPEN_READ | RAY_OPEN_WRITE | RAY_OPEN_CREATE);
-        if (sym_lock == RAY_FD_INVALID) { err = pq_error("cannot open shared symbol lock"); goto done; }
-        e = ray_file_lock_ex(sym_lock);
+        e = ray_sym_domain_writer_lock(shared_sym,&sym_lock);
         if (e != RAY_OK) { err = ray_error(ray_err_code_str(e),"parquet: cannot lock shared symbols"); goto done; }
 #if !defined(RAY_OS_WINDOWS)
         struct stat sym_st, input_st;
@@ -3601,7 +3596,7 @@ done:
     for (int64_t c = 0; c < opened; c++) ray_col_stream_abort(&writers[c]);
     ray_free_raw(writers); if (domain) ray_sym_domain_release(domain);
     pq_release_doms(cdoms,r ? r->ncols : 0);
-    if (sym_lock != RAY_FD_INVALID) { (void)ray_file_unlock(sym_lock); ray_file_close(sym_lock); }
+    ray_sym_domain_writer_unlock(sym_lock);
     ray_parquet_close(r); return err;
 }
 
