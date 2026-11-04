@@ -36,15 +36,18 @@ Signatures:
 Compressed F32/F64 writes and whole-column materialization require default FP controls (nearest rounding, masked exceptions, no FTZ/DAZ) on every calling/executing thread. Rayforce never silently normalizes the host's controls. Detected unsupported controls return `fpenv`; restore supported controls before retrying. Detection is not a complete portable validator: see [the compressed floating-point environment contract](../storage/index.md#compressed-floating-point-environment) for conservative refusal scope, platform-specific checks, and embedder responsibilities.
 
 
+- `(.db.splayed.set "dir" tbl "sym_path" 'nosync)` — as the 3-argument form, without an fsync of any file, symfile or directory it writes. Each file is still written under a temporary name and renamed into place, and a table that replaces an existing one is still published as a new generation; only a power loss or a kernel crash can leave written data unflushed to disk. For a table the caller can rebuild, such as a derived copy. The default form is unchanged.
+
 Returns `tbl` (retained), so the call can be threaded inside a larger expression.
 
-Errors: `type` (dir/sym not strings, tbl not a table), `domain` (paths empty / too long), and any `io`/`oom`/`corrupt` error code surfaced by the splayed writer.
+Errors: `type` (dir/sym not strings, tbl not a table, the 4th argument neither a dict nor a symbol), `domain` (paths empty / too long, the 4th argument a symbol other than `'nosync`, `'nosync` with an options dict), and any `io`/`oom`/`corrupt` error code surfaced by the splayed writer.
 
 ```lisp
 (set t (table [city temp rain]
   (list ['London 'Paris 'Tokyo] [15 22 28] [120.5 60.3 200.1])))
 
 (.db.splayed.set "/tmp/weather" t)
+(.db.splayed.set "/tmp/weather_copy" t "/tmp/weather_copy/.sym" 'nosync)
 ```
 
 ## `.db.splayed.get` { #db-splayed-get }
