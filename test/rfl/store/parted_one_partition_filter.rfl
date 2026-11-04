@@ -1,0 +1,44 @@
+;; @requires: posix  (fixtures are removed through a POSIX shell via .sys.exec)
+;; A where on a stored column answers the rows that pass it whatever the table
+;; holds: a root of one date partition, a partition of one row, and a symbol
+;; column of one distinct value included.  Northline's analytics Copy holds
+;; exactly this shape after a first launch's first committed day (nl-l5uq).
+
+(.sys.exec "rm -rf /tmp/rfl_one_part_a /tmp/rfl_one_part_b /tmp/rfl_one_part_c /tmp/rfl_one_part_d") -- 0
+
+;; One partition of one row: each stored column filters, alone and beside the
+;; partition column, and a value the row does not hold answers no row.
+(set R (table [underlying status state px] (list (as 'SYMBOL ['ES]) (as 'SYMBOL ['ready]) (as 'SYMBOL ['served]) [7])))
+(.db.splayed.set "/tmp/rfl_one_part_a/2026.08.20/daily_points" R "/tmp/rfl_one_part_a/.sym") -- R
+(set A (.db.parted.get "/tmp/rfl_one_part_a" 'daily_points))
+(count A) -- 1
+(at (select {from: A where: (== underlying 'ES)}) 'px) -- [7]
+(at (select {from: A where: (== status 'ready)}) 'px) -- [7]
+(at (select {from: A where: (== state 'served)}) 'px) -- [7]
+(at (select {from: A where: (== px 7)}) 'px) -- [7]
+(at (select {from: A where: (and (== underlying 'ES) (>= date 2026.08.19) (<= date 2026.08.21))}) 'px) -- [7]
+(count (select {from: A where: (== underlying 'NQ)})) -- 0
+(count (select {from: A where: (and (== underlying 'ES) (== status 'stale))})) -- 0
+
+;; One partition of two underlyings on the date: each answers its own row.
+(set T (table [underlying px] (list (as 'SYMBOL ['ES 'NQ]) [1 2])))
+(.db.splayed.set "/tmp/rfl_one_part_b/2026.08.20/daily_points" T "/tmp/rfl_one_part_b/.sym") -- T
+(set B (.db.parted.get "/tmp/rfl_one_part_b" 'daily_points))
+(at (select {from: B where: (== underlying 'ES)}) 'px) -- [1]
+(at (select {from: B where: (== underlying 'NQ)}) 'px) -- [2]
+
+;; A second one-row partition answers the row of each, as the first alone does.
+(set D1 (table [underlying px] (list (as 'SYMBOL ['ES]) [1])))
+(set D2 (table [underlying px] (list (as 'SYMBOL ['ES]) [2])))
+(.db.splayed.set "/tmp/rfl_one_part_c/2026.08.20/daily_points" D1 "/tmp/rfl_one_part_c/.sym") -- D1
+(.db.splayed.set "/tmp/rfl_one_part_c/2026.08.21/daily_points" D2 "/tmp/rfl_one_part_c/.sym") -- D2
+(set C (.db.parted.get "/tmp/rfl_one_part_c" 'daily_points))
+(at (select {from: C where: (== underlying 'ES)}) 'px) -- [1 2]
+
+;; The same row in a splayed table, with no parted root at all.
+(set S (table [underlying px] (list (as 'SYMBOL ['ES]) [3])))
+(.db.splayed.set "/tmp/rfl_one_part_d/daily_points" S) -- S
+(set D (.db.splayed.get "/tmp/rfl_one_part_d/daily_points"))
+(at (select {from: D where: (== underlying 'ES)}) 'px) -- [3]
+
+(.sys.exec "rm -rf /tmp/rfl_one_part_a /tmp/rfl_one_part_b /tmp/rfl_one_part_c /tmp/rfl_one_part_d") -- 0
